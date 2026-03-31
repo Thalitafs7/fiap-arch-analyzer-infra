@@ -1,0 +1,15 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+metadata:
+  name: api-cadastro-base
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - serviceaccount.yaml
+  - ingress.yaml
+
+commonLabels:
+  app.kubernetes.io/name: api-cadastro
+  app.kubernetes.io/part-of: arch-analyzer

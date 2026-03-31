@@ -1,0 +1,49 @@
+# =============================================================================
+# Arch Analyzer - Terraform Variables Example
+# =============================================================================
+# Copie este arquivo para terraform.tfvars e ajuste os valores
+# NUNCA commite terraform.tfvars (contém credenciais)
+# =============================================================================
+
+# General
+aws_region   = "us-east-1"
+environment  = "dev"
+project_name = "arch-analyzer"
+
+# AWS Academy
+lab_role_arn = "arn:aws:iam::012345678901:role/LabRole" # Substitua pelo ARN real do LabRole
+
+# Network
+vpc_cidr             = "10.0.0.0/16"
+public_subnet_cidrs  = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnet_cidrs = ["10.0.3.0/24", "10.0.4.0/24"]
+
+# EKS Cluster
+eks_cluster_version     = "1.29"
+eks_node_instance_types = ["t3.small"]
+eks_node_desired_size   = 2
+eks_node_min_size       = 1
+eks_node_max_size       = 3
+
+# EKS API access (OBRIGATÓRIO - restrinja ao seu IP)
+eks_public_access_cidrs = ["YOUR_IP/32"] # Ex: ["203.0.113.10/32"]
+
+# SSH access (opcional - restrinja ao seu IP)
+ssh_key_name      = ""                # Nome da key pair (opcional)
+allowed_ssh_cidrs = ["YOUR_IP/32"]    # Ex: ["203.0.113.10/32"]
+
+# Database
+db_name           = "archanalyzer"
+db_username       = "dbadmin"
+db_password       = "CHANGE_ME_USE_STRONG_PASSWORD" # Mínimo 16 caracteres
+db_instance_class = "db.t3.micro"
+
+# ECR (Container Registry)
+ecr_repository_names = ["api", "ia"]  # Repositórios a criar
+ecr_force_delete     = true           # Apenas para dev - remova em prod
+
+# Storage
+s3_force_destroy = true # Apenas para dev - remova em prod
+
+# ALB
+alb_ingress_cidrs = ["0.0.0.0/0"] # Restrinja em produção
