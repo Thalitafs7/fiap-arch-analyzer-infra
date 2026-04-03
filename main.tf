@@ -33,12 +33,12 @@ module "network" {
 module "security" {
   source = "./modules/security"
 
-  project_name       = var.project_name
-  environment        = var.environment
-  vpc_id             = module.network.vpc_id
-  vpc_cidr           = module.network.vpc_cidr
-  allowed_ssh_cidrs  = var.allowed_ssh_cidrs
-  alb_ingress_cidrs  = var.alb_ingress_cidrs
+  project_name      = var.project_name
+  environment       = var.environment
+  vpc_id            = module.network.vpc_id
+  vpc_cidr          = module.network.vpc_cidr
+  allowed_ssh_cidrs = var.allowed_ssh_cidrs
+  alb_ingress_cidrs = var.alb_ingress_cidrs
 }
 
 # =============================================================================

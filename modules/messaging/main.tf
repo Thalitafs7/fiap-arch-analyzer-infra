@@ -3,10 +3,10 @@
 # =============================================================================
 
 resource "aws_sqs_queue" "dlq" {
-  name                       = "${var.project_name}-dlq-${var.environment}"
-  message_retention_seconds  = 1209600 # 14 days (máximo para DLQ)
-  sqs_managed_sse_enabled    = true
-  receive_wait_time_seconds  = 20 # Long polling
+  name                      = "${var.project_name}-dlq-${var.environment}"
+  message_retention_seconds = 1209600 # 14 days (máximo para DLQ)
+  sqs_managed_sse_enabled   = true
+  receive_wait_time_seconds = 20 # Long polling
 
   tags = {
     Name = "${var.project_name}-dlq-${var.environment}"

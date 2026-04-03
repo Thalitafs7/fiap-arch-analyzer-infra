@@ -1,0 +1,40 @@
+name: CI Feature to Develop
+
+on:
+  push:
+    branches:
+      - 'feature/*'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Run Tests
+        run: ./.github/scripts/check_test_success.sh
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Create Pull Request to develop
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR_EXISTS=$(gh pr list --head "${{ github.ref_name }}" --base develop --json number | jq 'length > 0')
+          if [ "$PR_EXISTS" = "false" ]; then
+            gh pr create --title "Merge ${{ github.ref_name }} into develop" \
+                         --body "Automated PR from feature branch to develop." \
+                         --base develop \
+                         --head "${{ github.ref_name }}"
+          else
+            echo "PR already exists. Skipping creation."
+          fi

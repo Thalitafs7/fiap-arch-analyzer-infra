@@ -1,0 +1,87 @@
+name: CI Develop to Release
+
+on:
+  push:
+    branches:
+      - 'develop'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ci-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Get all tags and history
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Run Tests
+        run: ./.github/scripts/check_test_success.sh
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Calculate Next Version (SemVer)
+        id: semver
+        run: |
+          # Get the latest tag, default to 0.0.0 if none exists
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "0.0.0")
+          # Remove 'v' prefix if present
+          VERSION_CLEAN=${LATEST_TAG#v}
+
+          MAJOR=$(echo $VERSION_CLEAN | cut -d. -f1)
+          MINOR=$(echo $VERSION_CLEAN | cut -d. -f2)
+          PATCH=$(echo $VERSION_CLEAN | cut -d. -f3)
+
+          # If it was 0.0.0 and we want to start at 1.0.0 or just increment from 0.0.0
+          # The prompt says 1.0.0 -> 2.0.0, so let's assume it starts at 1.0.0 if no tags.
+          if [ "$LATEST_TAG" = "0.0.0" ]; then
+            MAJOR=1
+            MINOR=0
+            PATCH=0
+          else
+            LAST_COMMIT_MSG=$(git log -1 --pretty=%B)
+
+            if echo "$LAST_COMMIT_MSG" | grep -Eq "BREAKING CHANGE|.*!:"; then
+              MAJOR=$((MAJOR + 1))
+              MINOR=0
+              PATCH=0
+            elif echo "$LAST_COMMIT_MSG" | grep -qi "^feat:"; then
+              MINOR=$((MINOR + 1))
+              PATCH=0
+            else
+              PATCH=$((PATCH + 1))
+            fi
+          fi
+
+          NEXT_VERSION="$MAJOR.$MINOR.$PATCH"
+          echo "next_version=$NEXT_VERSION" >> $GITHUB_OUTPUT
+          echo "Calculated version: $NEXT_VERSION"
+
+      - name: Create Release Branch and PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT_VERSION: ${{ steps.semver.outputs.next_version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          BRANCH_NAME="release/$NEXT_VERSION"
+
+          # Create and push release branch from main
+          git checkout main
+          git pull origin main
+          git checkout -b "$BRANCH_NAME"
+          git push origin "$BRANCH_NAME"
+
+          # Open PR from develop to release/x.y.z
+          gh pr create --title "Release $NEXT_VERSION from develop" \
+                       --body "Automated release PR for version $NEXT_VERSION" \
+                       --base "$BRANCH_NAME" \
+                       --head develop

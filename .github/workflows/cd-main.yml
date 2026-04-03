@@ -1,0 +1,43 @@
+name: CD Main Deploy
+
+on:
+  push:
+    branches:
+      - 'main'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply
+        # In a real environment, you'd need AWS credentials configured.
+        # This step is placeholder for the actual deployment.
+        run: terraform apply -auto-approve
+
+      - name: Tag release
+        if: success()
+        run: |
+          # Try to extract version from commit message or previous tags
+          # This is a bit tricky on main, ideally the release PR should have the version
+          # or we can look at the merge commit message.
+          # For simplicity, we'll tag it if we can find a release/* branch pattern in merge.
+
+          LATEST_RELEASE_BRANCH=$(git log -1 --pretty=%B | grep -o 'release/[0-9.]*' | head -1 || true)
+          if [ -n "$LATEST_RELEASE_BRANCH" ]; then
+            VERSION=${LATEST_RELEASE_BRANCH#release/}
+            git tag "v$VERSION"
+            git push origin "v$VERSION"
+          fi
