@@ -3,7 +3,7 @@
 # =============================================================================
 
 resource "kubernetes_namespace" "app_namespaces" {
-  for_each = toset(["arch-analyzer-api", "arch-analyzer-ia", "argocd", "ingress-nginx"])
+  for_each = toset(["arch-analyzer-api", "arch-analyzer-ia", "ingress-nginx"])
 
   metadata {
     name = each.value
@@ -40,41 +40,6 @@ resource "helm_release" "ingress_nginx" {
   set {
     name  = "controller.admissionWebhooks.enabled"
     value = "false"
-  }
-
-  depends_on = [kubernetes_namespace.app_namespaces]
-}
-
-# =============================================================================
-# ArgoCD (Helm)
-# =============================================================================
-
-resource "helm_release" "argocd" {
-  name       = "argocd"
-  repository = "https://argoproj.github.io/argo-helm"
-  chart      = "argo-cd"
-  version    = var.argocd_chart_version != "" ? var.argocd_chart_version : null
-  namespace  = "argocd"
-  timeout    = 300
-
-  set {
-    name  = "server.service.type"
-    value = "NodePort"
-  }
-
-  set {
-    name  = "server.service.nodePortHttp"
-    value = "30444"
-  }
-
-  set {
-    name  = "server.service.nodePortHttps"
-    value = "30443"
-  }
-
-  set {
-    name  = "configs.params.server\\.insecure"
-    value = "true"
   }
 
   depends_on = [kubernetes_namespace.app_namespaces]
