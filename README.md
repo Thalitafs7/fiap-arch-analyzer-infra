@@ -1,6 +1,6 @@
 # Arch Analyzer - Infrastructure as Code
 
-Monorepo de infraestrutura Terraform para o projeto **Arch Analyzer**, projetado para rodar no **AWS Academy** com **Amazon EKS** e deploy via **GitOps (ArgoCD)**.
+Monorepo de infraestrutura Terraform para o projeto **Arch Analyzer**, projetado para rodar no **AWS Academy** com **Amazon EKS**.
 
 ## Arquitetura
 
@@ -44,7 +44,6 @@ Monorepo de infraestrutura Terraform para o projeto **Arch Analyzer**, projetado
 K8s Workloads:
   ├── namespace: arch-analyzer-api  → API Cadastro
   ├── namespace: arch-analyzer-ia   → IA Service + Qdrant (Vector DB)
-  ├── namespace: argocd             → ArgoCD (GitOps)
   └── namespace: ingress-nginx      → NGINX Ingress Controller
 ```
 
@@ -73,15 +72,9 @@ arch-analyzer-infra/
 │   ├── messaging/                   # SQS processing queue + DLQ
 │   ├── database/                    # RDS PostgreSQL 15
 │   ├── eks/                         # EKS cluster + managed node group + addons
-│   └── alb/                         # Application Load Balancer
+│   ├── alb/                         # Application Load Balancer
+│   └── k8s-config/                  # Namespaces, NetworkPolicies, ConfigMaps, NGINX Ingress
 │
-├── scripts/
-│   └── post-deploy.sh               # Setup pós-Terraform (NGINX, ArgoCD, NetworkPolicies)
-│
-├── gitops/
-│   └── argocd/
-│       ├── applications/            # ArgoCD Application manifests
-│       └── projects/                # ArgoCD AppProject
 │
 └── examples/
     ├── app-repo-api/                # Exemplo: repo da API Cadastro
@@ -132,14 +125,6 @@ terraform apply
 
 # 6. Configure o kubeconfig
 aws eks update-kubeconfig --region us-east-1 --name $(terraform output -raw eks_cluster_name)
-
-# 7. Execute o script post-deploy (NGINX Ingress, ArgoCD, NetworkPolicies, ConfigMaps)
-chmod +x scripts/post-deploy.sh
-./scripts/post-deploy.sh
-
-# 8. Aplique os manifests do ArgoCD (após editar URLs dos repos)
-kubectl apply -f gitops/argocd/projects/
-kubectl apply -f gitops/argocd/applications/
 ```
 
 ## Segurança
@@ -182,11 +167,10 @@ kubectl apply -f gitops/argocd/applications/
 |---|---|
 | EKS (gerenciado) | Cluster Kubernetes gerenciado pela AWS, auto-scaling, menor overhead |
 | EKS Managed Node Group | Nodes gerenciados com AMI otimizada, rolling updates automáticos |
-| ArgoCD (GitOps) | Deploy declarativo, auditável, auto-sync |
 | Kustomize (em vez de Helm) | Simplicidade para manifests de apps, patches nativos K8s |
 | Qdrant no EKS | Banco vetorial leve, roda como StatefulSet |
 | NGINX Ingress (NodePort) | Integração com ALB via NodePort, controle de roteamento no cluster |
-| Post-deploy script | Separação clara: Terraform → infra, script → configuração K8s |
+| Terraform K8s Config | Configuração K8s via Terraform, sem scripts externos |
 
 ## Outputs do Terraform
 
@@ -200,4 +184,3 @@ Após `terraform apply`, os seguintes outputs estarão disponíveis:
 - `s3_diagrams_bucket` - Nome do bucket S3
 - `sqs_processing_queue_url` - URL da fila SQS
 - `kubeconfig_command` - Comando AWS CLI para configurar kubectl
-- `argocd_url` - URL do ArgoCD (via ALB)
