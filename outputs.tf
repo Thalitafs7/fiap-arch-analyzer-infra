@@ -100,7 +100,4 @@ output "kubeconfig_command" {
   value       = module.eks.kubeconfig_command
 }
 
-output "argocd_url" {
-  description = "ArgoCD URL (via ALB)"
-  value       = "http://${module.alb.alb_dns_name}/argocd"
-}
+

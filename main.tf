@@ -155,7 +155,7 @@ module "alb" {
 # =============================================================================
 # Kubernetes Configuration Module
 # =============================================================================
-# Namespaces, NetworkPolicies, ConfigMaps, NGINX Ingress, ArgoCD
+# Namespaces, NetworkPolicies, ConfigMaps, NGINX Ingress
 # Tudo gerenciado via Terraform - sem scripts externos
 # =============================================================================
 

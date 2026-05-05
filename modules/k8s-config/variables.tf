@@ -49,9 +49,3 @@ variable "ingress_nginx_chart_version" {
   type        = string
   default     = ""
 }
-
-variable "argocd_chart_version" {
-  description = "Helm chart version for argo-cd"
-  type        = string
-  default     = ""
-}
