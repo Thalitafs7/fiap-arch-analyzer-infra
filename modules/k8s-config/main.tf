@@ -33,11 +33,11 @@ locals {
     SQS_DLQ_URL                     = var.sqs_dlq_url
     S3_DIAGRAMS_BUCKET              = var.s3_diagrams_bucket
     ECR_REGISTRY                    = "${data.aws_caller_identity.current.account_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
-    ECR_REPOSITORY_URL_GATEWAY      = var.ecr_repository_urls["arch-analyzer-gateway"]
-    ECR_REPOSITORY_URL_AUTH         = var.ecr_repository_urls["arch-analyzer-auth"]
-    ECR_REPOSITORY_URL_REGISTRATION = var.ecr_repository_urls["arch-analyzer-registration"]
-    ECR_REPOSITORY_URL_PROCESSING   = var.ecr_repository_urls["arch-analyzer-processing"]
-    ECR_REPOSITORY_URL_REPORT       = var.ecr_repository_urls["arch-analyzer-report"]
+    ECR_REPOSITORY_URL_GATEWAY      = var.ecr_repository_urls["gateway"]
+    ECR_REPOSITORY_URL_AUTH         = var.ecr_repository_urls["auth"]
+    ECR_REPOSITORY_URL_REGISTRATION = var.ecr_repository_urls["registration"]
+    ECR_REPOSITORY_URL_PROCESSING   = var.ecr_repository_urls["processing"]
+    ECR_REPOSITORY_URL_REPORT       = var.ecr_repository_urls["report"]
   }
 }
 

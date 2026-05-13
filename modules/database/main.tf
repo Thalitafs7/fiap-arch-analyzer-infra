@@ -6,7 +6,7 @@
 
 resource "aws_db_subnet_group" "main" {
   name        = "${var.project_name}-db-subnet-${var.environment}"
-  description = "Database subnet group for ${var.project_name} — private subnets only"
+  description = "Database subnet group for ${var.project_name} -- private subnets only"
   subnet_ids  = var.private_subnet_ids
 
   tags = {

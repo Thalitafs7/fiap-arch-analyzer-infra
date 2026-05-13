@@ -12,7 +12,7 @@
 
 resource "aws_security_group" "alb" {
   name_prefix = "${var.project_name}-alb-"
-  description = "ALB SG — ingress TCP/80 from alb_ingress_cidrs; egress unrestricted"
+  description = "ALB SG -- ingress TCP/80 from alb_ingress_cidrs; egress unrestricted"
   vpc_id      = var.vpc_id
 
   tags = {
@@ -61,7 +61,7 @@ resource "aws_vpc_security_group_egress_rule" "alb_egress_all" {
 
 resource "aws_security_group" "eks_nodes" {
   name_prefix = "${var.project_name}-eks-nodes-"
-  description = "EKS nodes SG — NodePort from ALB SG; egress HTTP/HTTPS only"
+  description = "EKS nodes SG -- NodePort from ALB SG; egress HTTP/HTTPS only"
   vpc_id      = var.vpc_id
 
   tags = {
@@ -139,7 +139,7 @@ resource "aws_vpc_security_group_egress_rule" "eks_egress_https" {
 
 resource "aws_security_group" "rds" {
   name_prefix = "${var.project_name}-rds-"
-  description = "RDS SG — ingress TCP/5432 from EKS nodes SG only"
+  description = "RDS SG -- ingress TCP/5432 from EKS nodes SG only"
   vpc_id      = var.vpc_id
 
   tags = {

@@ -233,7 +233,7 @@ module "mongodb" {
   source = "./modules/mongodb-on-eks"
 
   namespace                 = "data"
-  storage_class             = "gp3"
+  storage_class             = "gp2"
   storage_size              = "10Gi"
   root_password_secret_name = "arch-analyzer/auth/mongo"
   aws_region                = var.aws_region
@@ -250,7 +250,7 @@ module "redis" {
   source = "./modules/redis-on-eks"
 
   namespace            = "data"
-  storage_class        = "gp3"
+  storage_class        = "gp2"
   storage_size         = "2Gi"
   password_secret_name = "arch-analyzer/redis/password"
   aws_region           = var.aws_region

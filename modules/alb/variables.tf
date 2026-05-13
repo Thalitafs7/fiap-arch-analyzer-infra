@@ -33,6 +33,12 @@ variable "node_group_asg_names" {
   type        = list(string)
 }
 
+variable "expected_asg_count" {
+  description = "Number of ASGs to attach to the target group. Must be known at plan time (avoids for_each unknown-value issue)."
+  type        = number
+  default     = 1
+}
+
 variable "access_logs_bucket_id" {
   description = "S3 bucket ID (name) of the Access_Logs_Bucket for ALB access log delivery (Req 8.6)"
   type        = string

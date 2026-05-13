@@ -17,215 +17,179 @@
 # StatefulSet — single-replica MongoDB 7
 # ---------------------------------------------------------------------------
 
-resource "kubernetes_manifest" "mongodb_statefulset" {
-  manifest = {
-    apiVersion = "apps/v1"
-    kind       = "StatefulSet"
+resource "kubernetes_stateful_set_v1" "mongodb" {
+  metadata {
+    name      = "mongodb"
+    namespace = var.namespace
+    labels = {
+      "app.kubernetes.io/name"       = "mongodb"
+      "app.kubernetes.io/part-of"    = "arch-analyzer"
+      "app.kubernetes.io/component"  = "database"
+      "app.kubernetes.io/managed-by" = "terraform"
+    }
+  }
 
-    metadata = {
-      name      = "mongodb"
-      namespace = var.namespace
-      labels = {
-        "app.kubernetes.io/name"       = "mongodb"
-        "app.kubernetes.io/part-of"    = "arch-analyzer"
-        "app.kubernetes.io/component"  = "database"
-        "app.kubernetes.io/managed-by" = "terraform"
+  spec {
+    service_name = "mongodb"
+    replicas     = 1
+
+    selector {
+      match_labels = {
+        app = "mongodb"
       }
     }
 
-    spec = {
-      serviceName = "mongodb"
-      replicas    = 1
-
-      selector = {
-        matchLabels = {
-          app = "mongodb"
+    template {
+      metadata {
+        labels = {
+          app                           = "mongodb"
+          "app.kubernetes.io/name"      = "mongodb"
+          "app.kubernetes.io/part-of"   = "arch-analyzer"
+          "app.kubernetes.io/component" = "database"
         }
       }
 
-      template = {
-        metadata = {
-          labels = {
-            app                           = "mongodb"
-            "app.kubernetes.io/name"      = "mongodb"
-            "app.kubernetes.io/part-of"   = "arch-analyzer"
-            "app.kubernetes.io/component" = "database"
+      spec {
+        automount_service_account_token = false
+
+        security_context {
+          run_as_non_root = false
+          fs_group        = 999
+        }
+
+        # Init container — secret-sync (Requirement 10.3, 11.3)
+        init_container {
+          name  = "secrets-sync"
+          image = var.aws_cli_image
+
+          command = ["/bin/sh", "-c"]
+          args = [
+            <<-EOT
+            set -e
+            echo "Fetching MongoDB root password from Secrets Manager..."
+            SECRET_JSON=$(aws secretsmanager get-secret-value \
+              --secret-id "${var.root_password_secret_name}" \
+              --region "${var.aws_region}" \
+              --query SecretString \
+              --output text)
+            echo "$SECRET_JSON" | grep -o '"password":"[^"]*"' | cut -d'"' -f4 > /secrets/mongo-password
+            echo "Secret written to /secrets/mongo-password"
+            EOT
+          ]
+
+          volume_mount {
+            name       = "secrets"
+            mount_path = "/secrets"
+          }
+
+          resources {
+            requests = {
+              cpu    = "50m"
+              memory = "64Mi"
+            }
+            limits = {
+              cpu    = "100m"
+              memory = "128Mi"
+            }
           }
         }
 
-        spec = {
-          # Requirement 10.4 — no service account token auto-mount
-          automountServiceAccountToken = false
+        # Main container — MongoDB 7
+        container {
+          name  = "mongodb"
+          image = var.mongodb_image
 
-          securityContext = {
-            runAsNonRoot = false # MongoDB 7 official image runs as root by default; fsGroup set for volume ownership
-            fsGroup      = 999   # mongodb group inside the official image
+          port {
+            container_port = 27017
+            name           = "mongodb"
+            protocol       = "TCP"
           }
 
-          # ----------------------------------------------------------------
-          # Init container — secret-sync (Requirement 10.3, 11.3)
-          # Fetches arch-analyzer/auth/mongo from Secrets Manager via IMDS
-          # and writes the password to /secrets/mongo-password (plain text)
-          # ----------------------------------------------------------------
-          initContainers = [
-            {
-              name  = "secrets-sync"
-              image = var.aws_cli_image
+          env {
+            name  = "MONGO_INITDB_ROOT_USERNAME"
+            value = "root"
+          }
 
-              command = ["/bin/sh", "-c"]
-              args = [
-                <<-EOT
-                  set -e
-                  echo "Fetching MongoDB root password from Secrets Manager..."
-                  SECRET_JSON=$(aws secretsmanager get-secret-value \
-                    --secret-id "${var.root_password_secret_name}" \
-                    --region "${var.aws_region}" \
-                    --query SecretString \
-                    --output text)
-                  # Extract the 'password' field from the JSON payload
-                  echo "$SECRET_JSON" | grep -o '"password":"[^"]*"' | cut -d'"' -f4 > /secrets/mongo-password
-                  echo "Secret written to /secrets/mongo-password"
-                EOT
-              ]
+          env {
+            name  = "MONGO_INITDB_ROOT_PASSWORD_FILE"
+            value = "/secrets/mongo-password"
+          }
 
-              volumeMounts = [
-                {
-                  name      = "secrets"
-                  mountPath = "/secrets"
-                }
-              ]
-
-              resources = {
-                requests = {
-                  cpu    = "50m"
-                  memory = "64Mi"
-                }
-                limits = {
-                  cpu    = "100m"
-                  memory = "128Mi"
-                }
-              }
+          resources {
+            requests = {
+              cpu    = "200m"
+              memory = "256Mi"
             }
-          ]
-
-          # ----------------------------------------------------------------
-          # Main container — MongoDB 7
-          # ----------------------------------------------------------------
-          containers = [
-            {
-              name  = "mongodb"
-              image = var.mongodb_image
-
-              ports = [
-                {
-                  containerPort = 27017
-                  name          = "mongodb"
-                  protocol      = "TCP"
-                }
-              ]
-
-              env = [
-                {
-                  name  = "MONGO_INITDB_ROOT_USERNAME"
-                  value = "root"
-                },
-                # Password is read from the file written by the init container
-                {
-                  name  = "MONGO_INITDB_ROOT_PASSWORD_FILE"
-                  value = "/secrets/mongo-password"
-                }
-              ]
-
-              resources = {
-                requests = {
-                  cpu    = "200m"
-                  memory = "256Mi"
-                }
-                limits = {
-                  cpu    = "500m"
-                  memory = "512Mi"
-                }
-              }
-
-              livenessProbe = {
-                exec = {
-                  command = ["mongosh", "--eval", "db.adminCommand('ping')"]
-                }
-                initialDelaySeconds = 30
-                periodSeconds       = 10
-                timeoutSeconds      = 5
-                failureThreshold    = 3
-              }
-
-              readinessProbe = {
-                exec = {
-                  command = ["mongosh", "--eval", "db.adminCommand('ping')"]
-                }
-                initialDelaySeconds = 5
-                periodSeconds       = 5
-                timeoutSeconds      = 3
-                failureThreshold    = 3
-              }
-
-              securityContext = {
-                allowPrivilegeEscalation = false
-                capabilities = {
-                  drop = ["NET_RAW"]
-                }
-              }
-
-              volumeMounts = [
-                {
-                  name      = "mongodb-data"
-                  mountPath = "/data/db"
-                },
-                {
-                  name      = "secrets"
-                  mountPath = "/secrets"
-                  readOnly  = true
-                }
-              ]
+            limits = {
+              cpu    = "500m"
+              memory = "512Mi"
             }
-          ]
+          }
 
-          # ----------------------------------------------------------------
-          # Volumes
-          # ----------------------------------------------------------------
-          volumes = [
-            {
-              # emptyDir with Memory medium — secret never touches disk (Req 10.3)
-              name = "secrets"
-              emptyDir = {
-                medium = "Memory"
-              }
+          liveness_probe {
+            exec {
+              command = ["mongosh", "--eval", "db.adminCommand('ping')"]
             }
-          ]
+            initial_delay_seconds = 30
+            period_seconds        = 10
+            timeout_seconds       = 5
+            failure_threshold     = 3
+          }
+
+          readiness_probe {
+            exec {
+              command = ["mongosh", "--eval", "db.adminCommand('ping')"]
+            }
+            initial_delay_seconds = 5
+            period_seconds        = 5
+            timeout_seconds       = 3
+            failure_threshold     = 3
+          }
+
+          security_context {
+            allow_privilege_escalation = false
+          }
+
+          volume_mount {
+            name       = "mongodb-data"
+            mount_path = "/data/db"
+          }
+
+          volume_mount {
+            name       = "secrets"
+            mount_path = "/secrets"
+            read_only  = true
+          }
+        }
+
+        # Volumes
+        volume {
+          name = "secrets"
+          empty_dir {
+            medium = "Memory"
+          }
         }
       }
+    }
 
-      # ----------------------------------------------------------------
-      # VolumeClaimTemplates — gp3-backed PVC sized 10Gi (Req 11.2)
-      # ----------------------------------------------------------------
-      volumeClaimTemplates = [
-        {
-          metadata = {
-            name = "mongodb-data"
-            labels = {
-              "app.kubernetes.io/name"    = "mongodb"
-              "app.kubernetes.io/part-of" = "arch-analyzer"
-            }
-          }
-          spec = {
-            accessModes      = ["ReadWriteOnce"]
-            storageClassName = var.storage_class
-            resources = {
-              requests = {
-                storage = var.storage_size
-              }
-            }
+    # VolumeClaimTemplates — gp3-backed PVC (Req 11.2)
+    volume_claim_template {
+      metadata {
+        name = "mongodb-data"
+        labels = {
+          "app.kubernetes.io/name"    = "mongodb"
+          "app.kubernetes.io/part-of" = "arch-analyzer"
+        }
+      }
+      spec {
+        access_modes       = ["ReadWriteOnce"]
+        storage_class_name = var.storage_class
+        resources {
+          requests = {
+            storage = var.storage_size
           }
         }
-      ]
+      }
     }
   }
 }
@@ -234,37 +198,30 @@ resource "kubernetes_manifest" "mongodb_statefulset" {
 # ClusterIP Service — mongodb on port 27017 (Requirement 11.4)
 # ---------------------------------------------------------------------------
 
-resource "kubernetes_manifest" "mongodb_service" {
-  manifest = {
-    apiVersion = "v1"
-    kind       = "Service"
+resource "kubernetes_service_v1" "mongodb" {
+  metadata {
+    name      = "mongodb"
+    namespace = var.namespace
+    labels = {
+      "app.kubernetes.io/name"       = "mongodb"
+      "app.kubernetes.io/part-of"    = "arch-analyzer"
+      "app.kubernetes.io/component"  = "database"
+      "app.kubernetes.io/managed-by" = "terraform"
+    }
+  }
 
-    metadata = {
-      name      = "mongodb"
-      namespace = var.namespace
-      labels = {
-        "app.kubernetes.io/name"       = "mongodb"
-        "app.kubernetes.io/part-of"    = "arch-analyzer"
-        "app.kubernetes.io/component"  = "database"
-        "app.kubernetes.io/managed-by" = "terraform"
-      }
+  spec {
+    type = "ClusterIP"
+
+    selector = {
+      app = "mongodb"
     }
 
-    spec = {
-      type = "ClusterIP"
-
-      selector = {
-        app = "mongodb"
-      }
-
-      ports = [
-        {
-          name       = "mongodb"
-          port       = 27017
-          targetPort = 27017
-          protocol   = "TCP"
-        }
-      ]
+    port {
+      name        = "mongodb"
+      port        = 27017
+      target_port = 27017
+      protocol    = "TCP"
     }
   }
 }

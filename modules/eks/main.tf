@@ -66,11 +66,15 @@ resource "aws_eks_cluster" "main" {
   # Only api, audit, authenticator per task spec (Req 7.2)
   enabled_cluster_log_types = ["api", "audit", "authenticator"]
 
-  encryption_config {
-    provider {
-      key_arn = local.kms_key_arn
+  # Only enable encryption_config when a real CMK is available (not AWS Academy)
+  dynamic "encryption_config" {
+    for_each = var.use_aws_managed_kms ? [] : [1]
+    content {
+      provider {
+        key_arn = aws_kms_key.eks[0].arn
+      }
+      resources = ["secrets"]
     }
-    resources = ["secrets"]
   }
 
   tags = {
@@ -91,8 +95,9 @@ resource "aws_launch_template" "eks_nodes" {
   name_prefix = "${var.project_name}-eks-nodes-${var.environment}-"
   description = "Launch template for EKS managed node group - ${var.project_name}-${var.environment}"
 
-  # Attach the security group produced by the security module
-  vpc_security_group_ids = [var.eks_nodes_security_group_id]
+  # Attach the security group produced by the security module + EKS cluster SG
+  # The cluster SG is required for node-to-control-plane communication
+  vpc_security_group_ids = [var.eks_nodes_security_group_id, aws_eks_cluster.main.vpc_config[0].cluster_security_group_id]
 
   # Optional SSH key for node access
   key_name = var.ssh_key_name != "" ? var.ssh_key_name : null
@@ -215,6 +220,21 @@ resource "aws_eks_addon" "kube_proxy" {
 
   tags = {
     Name = "${var.project_name}-kube-proxy-${var.environment}"
+  }
+
+  depends_on = [aws_eks_node_group.main]
+}
+
+resource "aws_eks_addon" "ebs_csi_driver" {
+  cluster_name             = aws_eks_cluster.main.name
+  addon_name               = "aws-ebs-csi-driver"
+  service_account_role_arn = var.lab_role_arn
+
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+
+  tags = {
+    Name = "${var.project_name}-ebs-csi-${var.environment}"
   }
 
   depends_on = [aws_eks_node_group.main]

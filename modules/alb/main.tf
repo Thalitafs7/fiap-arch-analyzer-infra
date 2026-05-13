@@ -89,12 +89,13 @@ resource "aws_lb_listener" "http" {
 
 # =============================================================================
 # ASG Attachments — attach ALL EKS node group ASGs to the target group (Req 8.3)
-# node_group_asg_names is a list; iterate with for_each to cover multi-AZ node groups
+# Uses count based on expected_asg_count (known at plan time) to avoid
+# for_each unknown-value limitation with EKS-derived ASG names.
 # =============================================================================
 
 resource "aws_autoscaling_attachment" "eks_nodes" {
-  for_each = toset(var.node_group_asg_names)
+  count = var.expected_asg_count
 
-  autoscaling_group_name = each.value
+  autoscaling_group_name = var.node_group_asg_names[count.index]
   lb_target_group_arn    = aws_lb_target_group.ingress.arn
 }
