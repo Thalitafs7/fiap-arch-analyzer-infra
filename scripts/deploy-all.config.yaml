@@ -1,0 +1,82 @@
+# deploy-all.config.yaml
+# Declarative service list consumed by scripts/deploy-all.ps1 and scripts/deploy-all.sh.
+# Fields per entry:
+#   name           - logical service name
+#   repo_path      - path to the service repo relative to the parent directory of the infra repo
+#   dockerfile     - path to Dockerfile relative to repo_path
+#   build_context  - Docker build context relative to repo_path
+#   k8s_dir        - folder containing k8s manifests relative to repo_path (default: k8s)
+#   ecr_key        - ECR repository name key (matches ecr module repository_names)
+#   namespace      - Kubernetes namespace
+#   container_port - main application container port
+#   ingress_path   - NGINX ingress path prefix
+#   health_path    - health check path (container-level)
+#   deployments[]  - list of Deployment names to watch with kubectl rollout status
+#   migrations     - (optional) command to run DB migrations before k8s apply
+
+services:
+  - name: auth-service
+    repo_path: ../fiap-arch-analyzer-auth-service
+    dockerfile: Dockerfile
+    build_context: .
+    k8s_dir: k8s
+    ecr_key: auth
+    namespace: auth
+    container_port: 5002
+    ingress_path: /api/auth
+    health_path: /health
+    deployments:
+      - ms-auth-api
+
+  - name: registration-service
+    repo_path: ../fiap-arch-analyzer-registration-service
+    dockerfile: Dockerfile
+    build_context: .
+    k8s_dir: k8s
+    ecr_key: registration
+    namespace: arch-analyzer-api
+    container_port: 5002
+    ingress_path: /api/registration
+    health_path: /health
+    deployments:
+      - registration-service
+
+  - name: report-service
+    repo_path: ../fiap-arch-analyzer-report-service
+    dockerfile: Dockerfile
+    build_context: .
+    k8s_dir: k8s
+    ecr_key: report
+    namespace: arch-analyzer-ia
+    container_port: 8001
+    ingress_path: /api/reports
+    health_path: /health
+    deployments:
+      - report-service
+
+  - name: processing-service
+    repo_path: ../fiap-arch-analyzer-processing-service
+    dockerfile: Dockerfile
+    build_context: .
+    k8s_dir: k8s
+    ecr_key: processing
+    namespace: arch-analyzer-ia
+    container_port: 8000
+    ingress_path: /api/analyses
+    health_path: /health
+    deployments:
+      - processing-service
+      - celery-worker
+
+  - name: api-gateway
+    repo_path: ../fiap-arch-analyzer-api-gateway
+    dockerfile: Dockerfile
+    build_context: .
+    k8s_dir: k8s
+    ecr_key: gateway
+    namespace: arch-analyzer-api
+    container_port: 8080
+    ingress_path: /api/gateway
+    health_path: /health
+    deployments:
+      - api-gateway

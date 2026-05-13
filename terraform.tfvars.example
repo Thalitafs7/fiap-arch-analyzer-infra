@@ -1,8 +1,13 @@
 # =============================================================================
 # Arch Analyzer - Terraform Variables Example
 # =============================================================================
-# Copie este arquivo para terraform.tfvars e ajuste os valores
-# NUNCA commite terraform.tfvars (contém credenciais)
+# INSTRUÇÃO: Copie este arquivo para terraform.tfvars e preencha os valores.
+#
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+# !! ATENÇÃO: NUNCA commite o arquivo terraform.tfvars no repositório.       !!
+# !! Ele contém senhas, chaves de API e segredos que NÃO devem ser expostos. !!
+# !! O .gitignore já exclui terraform.tfvars — não remova essa regra.        !!
+# !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 # =============================================================================
 
 # General
@@ -35,11 +40,25 @@ allowed_ssh_cidrs = ["YOUR_IP/32"]    # Ex: ["203.0.113.10/32"]
 # Database
 db_name           = "archanalyzer"
 db_username       = "dbadmin"
-db_password       = "CHANGE_ME_USE_STRONG_PASSWORD" # Mínimo 16 caracteres
+db_password       = "CHANGE_ME_USE_STRONG_PASSWORD" # Mínimo 16 caracteres, ex: openssl rand -base64 24
 db_instance_class = "db.t3.micro"
 
+# Secrets — armazenados no AWS Secrets Manager pelo módulo `secrets`
+# Gere valores fortes: openssl rand -base64 32
+jwt_signing_key  = "CHANGE_ME_JWT_SIGNING_KEY_MIN_32_CHARS"
+mongo_password   = "CHANGE_ME_MONGO_ROOT_PASSWORD"
+redis_password   = "CHANGE_ME_REDIS_AUTH_PASSWORD"
+
+# LLM API Keys — mapa de chaves por provedor
+# HF_API_TOKEN é opcional; remova a linha se não usar Hugging Face
+llm_api_keys = {
+  OPENAI_API_KEY    = "sk-CHANGE_ME_OPENAI_KEY"
+  ANTHROPIC_API_KEY = "sk-ant-CHANGE_ME_ANTHROPIC_KEY"
+  # HF_API_TOKEN    = "hf_CHANGE_ME_HUGGINGFACE_TOKEN"
+}
+
 # ECR (Container Registry)
-ecr_repository_names = ["api", "ia"]  # Repositórios a criar
+ecr_repository_names = ["gateway", "auth", "registration", "processing", "report"]
 ecr_force_delete     = true           # Apenas para dev - remova em prod
 
 # Storage
