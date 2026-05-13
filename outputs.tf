@@ -77,6 +77,11 @@ output "ecr_repository_urls" {
   value       = module.ecr.repository_urls
 }
 
+output "ecr_registry_url" {
+  description = "Base ECR registry URL for docker login (account.dkr.ecr.region.amazonaws.com)"
+  value       = module.ecr.registry_url
+}
+
 # =============================================================================
 # Messaging Outputs
 # =============================================================================

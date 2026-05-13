@@ -69,6 +69,7 @@ module "ecr" {
 
   project_name     = var.project_name
   environment      = var.environment
+  aws_region       = var.aws_region
   repository_names = var.ecr_repository_names
   force_delete     = var.ecr_force_delete
 }

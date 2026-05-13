@@ -219,6 +219,7 @@ Push-Location $infraRoot
 $eksClusterName = Get-TerraformOutput "eks_cluster_name"
 $albDnsName     = Get-TerraformOutput "alb_dns_name"
 $ecrUrlsJson    = Get-TerraformOutputJson "ecr_repository_urls"
+$awsRegion      = "us-east-1"
 Pop-Location
 
 Write-Success "EKS cluster: $eksClusterName"
@@ -267,11 +268,10 @@ Write-Success "MongoDB and Redis are ready"
 # ──────────────────────────────────────────────────────────────────────────── Stage 7: ECR login + build + push (Req 15.6) ────────────────────────────
 
 Write-Step "Logging in to ECR (Req 15.6)"
-# Derive account id and registry from any ECR URL
-$sampleEcrUrl = ($ecrUrlsJson.PSObject.Properties | Select-Object -First 1).Value
-$ecrRegistry  = ($sampleEcrUrl -split "/")[0]
-$awsAccountId = ($ecrRegistry -split "\.")[0]
-$awsRegion    = "us-east-1"
+# Usa o output ecr_registry_url diretamente (account.dkr.ecr.region.amazonaws.com)
+Push-Location $infraRoot
+$ecrRegistry = Get-TerraformOutput "ecr_registry_url"
+Pop-Location
 
 Invoke-Cmd -Cmd @("aws", "ecr", "get-login-password",
     "--region", $awsRegion) -CaptureOutput | ForEach-Object {
