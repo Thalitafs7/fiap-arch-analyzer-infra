@@ -395,8 +395,37 @@ foreach ($stage in $stageOrder) {
 
         # Req 15.8: prefer kustomize when kustomization.yaml exists
         if (Test-Path $kustomizationFile) {
-            Write-Info "kubectl apply -k $k8sPath"
-            Invoke-Cmd -Cmd @("kubectl", "apply", "-k", $k8sPath)
+            # Service kustomization.yaml uses ${ECR_REGISTRY} and ${IMAGE_TAG}
+            # placeholders that kustomize itself does not expand. Render with
+            # kustomize, substitute the placeholders against the resolved
+            # registry+tag, then apply via stdin. This honours the
+            # documented contract in every service repo:
+            #   kubectl kustomize k8s/ | sed 's|${ECR_REGISTRY}|...|g' | \
+            #       sed 's|${IMAGE_TAG}|...|g' | kubectl apply -f -
+            Write-Info "kubectl kustomize $k8sPath | substitute(ECR_REGISTRY,IMAGE_TAG) | kubectl apply -f -"
+            if ($DryRun) {
+                Write-Info "[DRY-RUN] kubectl kustomize $k8sPath | kubectl apply -f -"
+            } else {
+                $rendered = & kubectl kustomize $k8sPath
+                if ($LASTEXITCODE -ne 0) {
+                    throw "kubectl kustomize failed for $k8sPath (exit $LASTEXITCODE)"
+                }
+                $renderedStr = ($rendered -join "`n")
+                $renderedStr = $renderedStr `
+                    -replace [regex]::Escape('${ECR_REGISTRY}'), $ecrRegistry `
+                    -replace [regex]::Escape('${IMAGE_TAG}'),    $GitSha
+                # Sanity check: no unsubstituted placeholder leaks through.
+                if ($renderedStr -match '\$\{[A-Z_][A-Z0-9_]*\}') {
+                    $unresolved = ([regex]::Matches($renderedStr,
+                        '\$\{[A-Z_][A-Z0-9_]*\}') | ForEach-Object { $_.Value } |
+                        Sort-Object -Unique) -join ', '
+                    throw "Unresolved placeholders in $k8sPath after substitution: $unresolved"
+                }
+                $renderedStr | & kubectl apply -f -
+                if ($LASTEXITCODE -ne 0) {
+                    throw "kubectl apply failed for $k8sPath (exit $LASTEXITCODE)"
+                }
+            }
         } else {
             Write-Info "kubectl apply -f $k8sPath/ --namespace $($svc.namespace)"
             Invoke-Cmd -Cmd @("kubectl", "apply", "-f", "$k8sPath/",

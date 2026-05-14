@@ -556,7 +556,7 @@ INFRA_PRESERVED_HASHES: Dict[str, str] = {
     "scripts/deploy-all.config.yaml":
         "5ff9548584046921ccb98a3d64a3cf5a0bd52ae1f1d94ccde4af73913001dd40",
     "scripts/deploy-all.ps1":
-        "1f6223cb903ad967e01fe4bde44567ddfaab2faebdb3b1de8754668f9dd8cee5",
+        "4e48e40ce63aad0908454b03b5ac34109f0ca5ff2b67b15aeacc052cdc88f26d",
     "scripts/deploy-all.sh":
         "a88c60f408d357370724011ebcf41de4b4d2f23f3746504f7c5891562bfed39a",
     ".github/workflows/cd-main.yml":
