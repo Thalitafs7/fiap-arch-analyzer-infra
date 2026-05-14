@@ -16,9 +16,16 @@ variable "environment" {
 # Sensitive credentials — never logged, never shown in plan output
 # ---------------------------------------------------------------------------
 
-variable "db_password" {
-  description = "Master password for the RDS PostgreSQL instance. Used to populate db/registration, db/processing, and db/report secrets."
-  type        = string
+variable "db_connection_strings" {
+  description = <<-EOT
+    Map of service key -> full Postgres connection string. Comes from
+    modules/database outputs. Each value is written verbatim into the
+    corresponding arch-analyzer/db/<service> Secrets Manager entry as
+    the SecretString (NOT JSON-wrapped). Service init containers can
+    therefore consume it directly with a `tr -d '\n'` and feed it to
+    EF Core / SQLAlchemy without JSON parsing.
+  EOT
+  type        = map(string)
   sensitive   = true
 }
 

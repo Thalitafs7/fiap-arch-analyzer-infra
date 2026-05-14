@@ -86,8 +86,26 @@ module "messaging" {
 }
 
 # =============================================================================
-# Database Module (RDS PostgreSQL)
+# Database Module (RDS PostgreSQL — per-service instances)
 # =============================================================================
+# Per-service master passwords are auto-generated. Keeping them out of
+# var.databases means they never need to live in terraform.tfvars and the
+# plan output never echoes them in plaintext beyond the standard
+# random_password sensitive treatment.
+#
+# override_special restricts the special-char alphabet to characters
+# that are accepted both by RDS master-password validation and by .NET
+# Npgsql / Python psycopg URI parsing. Excluded (by virtue of NOT being
+# in the list): / @ ' " ; — these either break the AWS RDS API or
+# upset connection-string parsers.
+
+resource "random_password" "db_master" {
+  for_each = var.databases
+
+  length           = 24
+  special          = true
+  override_special = "!#$%*-_+=" # exclude / @ ' " ; (RDS-friendly)
+}
 
 module "database" {
   source = "./modules/database"
@@ -97,10 +115,12 @@ module "database" {
   vpc_id                = module.network.vpc_id
   private_subnet_ids    = module.network.private_subnet_ids
   rds_security_group_id = module.security.rds_security_group_id
-  db_name               = var.db_name
-  db_username           = var.db_username
-  db_password           = var.db_password
-  db_instance_class     = var.db_instance_class
+
+  databases = {
+    for k, v in var.databases : k => merge(v, {
+      password = random_password.db_master[k].result
+    })
+  }
 }
 
 # =============================================================================
@@ -176,9 +196,9 @@ module "k8s_config" {
   aws_region               = var.aws_region
   cluster_name             = module.eks.cluster_name
   alb_dns_name             = module.alb.alb_dns_name
-  db_address               = module.database.db_address
-  db_port                  = module.database.db_port
-  db_name                  = var.db_name
+  db_address               = module.database.instances["registration"].address
+  db_port                  = module.database.instances["registration"].port
+  db_name                  = module.database.instances["registration"].db_name
   sqs_processing_queue_url = module.messaging.processing_queue_url
   sqs_dlq_url              = module.messaging.dlq_url
   s3_diagrams_bucket       = module.storage.diagrams_bucket_id
@@ -195,9 +215,11 @@ module "k8s_config" {
 module "secrets" {
   source = "./modules/secrets"
 
-  project_name    = var.project_name
-  environment     = var.environment
-  db_password     = var.db_password
+  project_name = var.project_name
+  environment  = var.environment
+
+  db_connection_strings = module.database.connection_strings
+
   jwt_signing_key = var.jwt_signing_key
   mongo_password  = var.mongo_password
   redis_password  = var.redis_password

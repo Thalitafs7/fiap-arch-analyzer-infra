@@ -1,5 +1,5 @@
 variable "project_name" {
-  description = "Project name prefix for resource naming (e.g. arch-analyzer). DB identifier = <project_name>-db-<env>."
+  description = "Project name prefix for resource naming (e.g. arch-analyzer). DB identifier = <project_name>-db-<service>-<env>."
   type        = string
 }
 
@@ -23,25 +23,28 @@ variable "rds_security_group_id" {
   type        = string
 }
 
-variable "db_name" {
-  description = "Name of the initial database created on the RDS instance (e.g. archanalyzer)."
-  type        = string
-}
+variable "databases" {
+  description = <<-EOT
+    Map of per-service Postgres databases. Each key produces an
+    aws_db_instance with its own DB name, master username, master
+    password, and optional instance class. Default class db.t3.micro
+    (Academy-whitelisted, ~$13/mo). Req 6.2, 6.3, 6.4.
 
-variable "db_username" {
-  description = "Master username for the RDS instance. Sensitive — never log or output."
-  type        = string
-  sensitive   = true
-}
-
-variable "db_password" {
-  description = "Master password for the RDS instance. Sensitive — never log or output. Use Secrets Manager for rotation."
-  type        = string
-  sensitive   = true
-}
-
-variable "db_instance_class" {
-  description = "RDS instance class. db.t3.micro is Academy-whitelisted and cost-efficient (~$13/mo). Req 6.3."
-  type        = string
-  default     = "db.t3.micro"
+    The map key is the logical service identifier (registration, report,
+    processing) and is used as part of the RDS identifier and the
+    Service tag on the resulting instance.
+  EOT
+  type = map(object({
+    db_name               = string
+    username              = string
+    password              = string
+    instance_class        = optional(string, "db.t3.micro")
+    allocated_storage     = optional(number, 20)
+    max_allocated_storage = optional(number, 50)
+  }))
+  sensitive = true
+  validation {
+    condition     = length(var.databases) >= 1
+    error_message = "At least one database must be declared."
+  }
 }

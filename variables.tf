@@ -113,32 +113,32 @@ variable "eks_public_access_cidrs" {
 }
 
 # =============================================================================
-# Database
+# Database — per-service Postgres instances
 # =============================================================================
 
-variable "db_name" {
-  description = "Name of the PostgreSQL database"
-  type        = string
-  default     = "archanalyzer"
-}
-
-variable "db_username" {
-  description = "Master username for the RDS instance"
-  type        = string
-  default     = "dbadmin"
-  sensitive   = true
-}
-
-variable "db_password" {
-  description = "Master password for the RDS instance"
-  type        = string
-  sensitive   = true
-}
-
-variable "db_instance_class" {
-  description = "RDS instance class"
-  type        = string
-  default     = "db.t3.micro"
+variable "databases" {
+  description = <<-EOT
+    Per-service Postgres database definitions. Each entry yields one RDS
+    instance. Keys MUST be one of: registration, report, processing.
+    Master passwords are NOT declared here — they are auto-generated via
+    `random_password` in main.tf and injected into the database module
+    at plan time.
+  EOT
+  type = map(object({
+    db_name           = string
+    username          = string
+    instance_class    = optional(string, "db.t3.micro")
+    allocated_storage = optional(number, 20)
+  }))
+  default = {
+    registration = { db_name = "registration_db", username = "registration_user" }
+    report       = { db_name = "report_db", username = "report_user" }
+    processing   = { db_name = "processing_db", username = "processing_user" }
+  }
+  validation {
+    condition     = alltrue([for k in keys(var.databases) : contains(["registration", "report", "processing"], k)])
+    error_message = "Database keys must be one of: registration, report, processing."
+  }
 }
 
 # =============================================================================
