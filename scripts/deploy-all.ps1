@@ -107,9 +107,24 @@ function Invoke-Cmd {
 # Uses a minimal parser sufficient for deploy-all.config.yaml structure.
 function ConvertFrom-SimpleYaml([string]$Path) {
     # Delegate to python if available (most reliable), else use yq/powershell-yaml
-    $python = Get-Command python3 -ErrorAction SilentlyContinue
-    if (-not $python) { $python = Get-Command python -ErrorAction SilentlyContinue }
-    if ($python) {
+    # Try well-known Python paths first, then fall back to Get-Command
+    $pythonExe = $null
+    $knownPaths = @(
+        "C:\Users\user\AppData\Local\Programs\Python\Python312\python.exe",
+        "C:\Python312\python.exe",
+        "C:\Python311\python.exe",
+        "C:\Python310\python.exe"
+    )
+    foreach ($p in $knownPaths) {
+        if (Test-Path $p) { $pythonExe = $p; break }
+    }
+    if (-not $pythonExe) {
+        $cmd = Get-Command python3 -ErrorAction SilentlyContinue
+        if (-not $cmd) { $cmd = Get-Command python -ErrorAction SilentlyContinue }
+        if ($cmd) { $pythonExe = $cmd.Source }
+    }
+
+    if ($pythonExe) {
         $script = @'
 import sys, yaml, json
 with open(sys.argv[1]) as f:
@@ -118,8 +133,8 @@ with open(sys.argv[1]) as f:
         $tmpScript = [System.IO.Path]::GetTempFileName() + ".py"
         Set-Content -Path $tmpScript -Value $script -Encoding UTF8
         try {
-            $json = & $python.Source $tmpScript $Path 2>&1
-            if ($LASTEXITCODE -eq 0) { return $json | ConvertFrom-Json }
+            $json = & $pythonExe $tmpScript $Path 2>&1 | Out-String
+            if ($LASTEXITCODE -eq 0 -and $json.Trim()) { return $json.Trim() | ConvertFrom-Json }
         } finally {
             Remove-Item $tmpScript -ErrorAction SilentlyContinue
         }
@@ -330,7 +345,7 @@ foreach ($svc in $cfg.services) {
 
 Write-Step "Running database migrations (services that declare them)"
 foreach ($svc in $cfg.services) {
-    if (-not $svc.migrations) { continue }
+    if (-not ($svc.PSObject.Properties.Name -contains 'migrations') -or -not $svc.migrations) { continue }
     Write-Info "Migration for $($svc.name): $($svc.migrations.command)"
     $repoAbs = if ([System.IO.Path]::IsPathRooted($svc.repo_path)) {
         $svc.repo_path

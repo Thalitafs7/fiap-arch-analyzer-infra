@@ -15,6 +15,11 @@ def pytest_configure(config):
         "markers",
         "chaos: chaos tests that require KUBECONFIG and kubectl to be available",
     )
+    config.addinivalue_line(
+        "markers",
+        "integration: integration tests that require live AWS / kubectl access "
+        "(skip by default; run with `pytest -m integration`)",
+    )
 
 
 @pytest.fixture(scope="session")

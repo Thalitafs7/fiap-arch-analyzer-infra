@@ -1,0 +1,558 @@
+# =============================================================================
+# cd-deploy-all — consolidated full-stack deployment (SCAFFOLD)
+# =============================================================================
+#
+# PURPOSE
+#   Single infra-owned, manually-triggered entry point that deploys all five
+#   Arch Analyzer services (auth, registration, report, processing, api-gateway)
+#   to AWS in dependency order with one shared image tag and one consolidated
+#   Validator report. This workflow is the CI surface for the existing
+#   `scripts/deploy-all.ps1` orchestrator — no orchestration logic lives in
+#   YAML; the script remains the single source of truth for the 11-stage flow.
+#
+#   This file is currently the SCAFFOLD only (task 3.1). Subsequent tasks
+#   (3.2-3.7) wire credentials, image-tag resolution, sibling repo checkouts,
+#   toolchain install, orchestrator invocation, and artifact upload.
+#
+# IDEMPOTENCY CONTRACT
+#   Re-running this workflow with no code changes converges to zero changes:
+#     - Terraform: `terraform apply` is a no-op when state matches declared.
+#     - ECR: `docker push` of an unchanged image yields no new digest.
+#     - Kubernetes: `kubectl apply` is a no-op when live object == manifest.
+#   Re-running back-to-back with no commits in between is the canonical
+#   idempotency check (Property 1 in design.md "Correctness Properties").
+#
+# AP-5 — LAB-RESET SEMANTICS
+#   Idempotency holds within a single AWS Academy Learner Lab session. After
+#   a Lab reset (Academy doc §6.3), session-created AWS resources are wiped;
+#   a subsequent run correctly recreates them from declared Terraform state.
+#   This is convergence, NOT an idempotency violation.
+#
+# AP-7 — REGION CONSTRAINT
+#   AWS Academy access is limited to `us-east-1` and `us-west-2` (Academy
+#   doc §6.1). The workflow MUST reject any other region before any mutating
+#   step. The default region pinned by this workflow is `us-east-1`.
+#
+# AP-9 — MANUAL SESSION-TOKEN REFRESH
+#   GitHub OIDC federation to AWS is forbidden in Academy:
+#   `iam:CreateOpenIDConnectProvider` is blocked by SCP and trust-policy
+#   edits on `LabRole` are blocked (Academy doc §1.3.3, §2.2.1). The only
+#   viable authentication mode is long-lived GitHub repo secrets carrying
+#   the Learner Lab session token. Operators MUST refresh the three
+#   secrets at the start of each Lab session BEFORE triggering this workflow:
+#     - AWS_ACCESS_KEY_ID
+#     - AWS_SECRET_ACCESS_KEY
+#     - AWS_SESSION_TOKEN
+#   An expired token aborts the run on the `aws sts get-caller-identity`
+#   probe (added by task 3.2) before any mutating step executes.
+#
+# PRESERVATION BOUNDARY (do NOT modify from this workflow)
+#   - Any service-repo `.github/workflows/*.yml` file (per-service CI and
+#     single-service `cd-main.yml` hotfix path).
+#   - Infra `.github/workflows/cd-main.yml` (Terraform-only semantics).
+#   - `scripts/deploy-all.ps1`, `scripts/deploy-all.sh`,
+#     `scripts/deploy-all.config.yaml` (orchestrator contract).
+#   - The `infra-outputs` ConfigMap schema.
+#   - LabRole-only authentication (no new IAM principals).
+#
+# WORKSPACE LAYOUT (task 3.4)
+#   `actions/checkout@v4` rejects any `path:` that escapes
+#   `$GITHUB_WORKSPACE` (input-helper.ts: "Repository path '...' is not
+#   under '...'"). To preserve the `repo_path: ../fiap-arch-analyzer-<svc>`
+#   contract that `scripts/deploy-all.config.yaml` already documents
+#   without modifying that file or `scripts/deploy-all.ps1`, this workflow
+#   checks the infra repo into a sibling-style subdir of the workspace
+#   alongside the five service repos:
+#
+#     $GITHUB_WORKSPACE/
+#       fiap-arch-analyzer-infra/                ← this repo (workflow host)
+#       fiap-arch-analyzer-auth-service/
+#       fiap-arch-analyzer-registration-service/
+#       fiap-arch-analyzer-processing-service/
+#       fiap-arch-analyzer-report-service/
+#       fiap-arch-analyzer-api-gateway/
+#
+#   The orchestrator's `Split-Path $PSScriptRoot -Parent` resolves to the
+#   infra subdir; `Join-Path $infraRoot ../fiap-arch-analyzer-auth-service`
+#   resolves to the workspace-level sibling. No script or config change.
+#
+# CHECKOUT TOKEN (task 3.4)
+#   Sibling-repo checkouts default to `${{ secrets.GITHUB_TOKEN }}`. This
+#   works when every sibling repo is public AND owned by the same account
+#   that hosts this workflow. If any sibling repo is PRIVATE or lives in a
+#   different organisation, the default GitHub token will return 404 on
+#   `git fetch`. In that case, create a fine-scoped Personal Access Token
+#   with `Contents: read` on every sibling repo and store it as the
+#   `SERVICES_CHECKOUT_TOKEN` GitHub repo secret on this infra repo. The
+#   sibling-checkout steps below pick it up automatically when set, falling
+#   back to `GITHUB_TOKEN` when absent — so this fix introduces no new
+#   MANDATORY secret as long as the five sibling repos are public.
+# =============================================================================
+
+name: cd-deploy-all
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: >-
+          Optional shared image tag for all five service images. Leave empty
+          to default to `git rev-parse --short HEAD` of the infra repo
+          checkout (resolved by task 3.3). Allowed charset: [A-Za-z0-9._-],
+          max 128 chars, must not start with `.`, `-`, or `_`.
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  deploy-all:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # ---------------------------------------------------------------------
+      # Task 3.2 — AWS credentials + fail-fast STS probe
+      #
+      # WHY THIS SHAPE
+      #   AWS Academy blocks `iam:CreateOpenIDConnectProvider` (Academy doc
+      #   §1.3.3) and `iam:AttachRolePolicy` on `LabRole` (§2.2.1), so GitHub
+      #   OIDC federation to AWS is not viable here. The only supported
+      #   authentication mode is the long-lived Learner Lab session token
+      #   carried by the three pre-existing repo secrets (already used by
+      #   every service-repo `cd-main.yml`). No new IAM users, roles, or
+      #   principals are introduced — `LabRole` remains the sole identity
+      #   (Requirement 3.5 / AP-9).
+      #
+      #   `aws-region` is hardcoded to `us-east-1` because AWS Academy access
+      #   is limited to `us-east-1` and `us-west-2` (Academy doc §6.1 / AP-7);
+      #   us-east-1 is the canonical region used by the rest of this repo's
+      #   Terraform state and by `scripts/deploy-all.config.yaml`.
+      #
+      #   The STS probe runs IMMEDIATELY after credential configuration and
+      #   BEFORE any mutating step (terraform apply / docker push / kubectl
+      #   apply / orchestrator invocation, all wired by tasks 3.3-3.7). On
+      #   `ExpiredToken` the run aborts non-zero with a clear refresh prompt
+      #   in stderr (Requirement 2.8 / `design.md` "Fix Implementation >
+      #   Specific Changes #2").
+      # ---------------------------------------------------------------------
+      - name: Configure AWS credentials (LabRole session token)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Verify AWS credentials (fail-fast on ExpiredToken)
+        shell: bash
+        run: |
+          set +e
+          STS_OUTPUT="$(aws sts get-caller-identity 2>&1)"
+          STS_EXIT=$?
+          set -e
+
+          if [ $STS_EXIT -ne 0 ]; then
+            if printf '%s' "$STS_OUTPUT" | grep -qiE 'ExpiredToken|ExpiredTokenException'; then
+              {
+                echo "::error::AWS Learner Lab session token has expired."
+                echo "Refresh the following GitHub repo secrets from a fresh AWS Academy Learner Lab session and re-run this workflow:"
+                echo "  - AWS_ACCESS_KEY_ID"
+                echo "  - AWS_SECRET_ACCESS_KEY"
+                echo "  - AWS_SESSION_TOKEN"
+                echo "Underlying error: $STS_OUTPUT"
+              } >&2
+              exit 1
+            fi
+            {
+              echo "::error::aws sts get-caller-identity failed before any mutating step."
+              echo "Underlying error: $STS_OUTPUT"
+            } >&2
+            exit $STS_EXIT
+          fi
+
+          echo "AWS credentials probe OK — caller identity:"
+          echo "$STS_OUTPUT"
+
+      # ---------------------------------------------------------------------
+      # Task 3.3 / 3.4 — Check out the infra repo (host of this workflow)
+      #
+      # WHY HERE
+      #   The shared `IMAGE_TAG` resolver below falls back to
+      #   `git rev-parse --short HEAD` when `inputs.image_tag` is empty;
+      #   that command requires a real `.git` directory on disk. The
+      #   infra-repo checkout MUST land before the resolver step, but
+      #   AFTER the STS probe so a stale Learner Lab session still aborts
+      #   the run before any disk mutation. Sibling service-repo checkouts
+      #   follow this step (task 3.4).
+      #
+      #   `path: fiap-arch-analyzer-infra` lands the repo in a sibling-style
+      #   subdir of `$GITHUB_WORKSPACE` so the five service repos can be
+      #   placed adjacent to it (see "WORKSPACE LAYOUT" in the file header).
+      #   The orchestrator's `Split-Path $PSScriptRoot -Parent` resolves to
+      #   that infra subdir, keeping `repo_path: ../fiap-arch-analyzer-<svc>`
+      #   in `scripts/deploy-all.config.yaml` correct without modifying the
+      #   config (preserves Requirement 3.2).
+      #
+      #   `fetch-depth: 1` is sufficient — `rev-parse --short HEAD` only
+      #   needs the tip commit, and shallow checkout keeps runtime minimal
+      #   (preserves the AP-8 budget surface — runner minutes are billed).
+      # ---------------------------------------------------------------------
+      - name: Check out infra repo
+        uses: actions/checkout@v4
+        with:
+          path: fiap-arch-analyzer-infra
+          fetch-depth: 1
+
+      # ---------------------------------------------------------------------
+      # Task 3.4 — Check out sibling service repos
+      #
+      # CONTRACT (matches `scripts/deploy-all.config.yaml`):
+      #   The orchestrator resolves each service's source tree as
+      #   `Join-Path $infraRoot $svc.repo_path`, with `repo_path` declared
+      #   as `../fiap-arch-analyzer-<service>`. Placing the infra repo at
+      #   `$GITHUB_WORKSPACE/fiap-arch-analyzer-infra/` (above) and each
+      #   service repo at `$GITHUB_WORKSPACE/fiap-arch-analyzer-<service>/`
+      #   makes that path resolution work unchanged on the runner — no
+      #   modification to `deploy-all.config.yaml` or `deploy-all.ps1`.
+      #
+      # WHY NOT `path: ../fiap-arch-analyzer-<service>`
+      #   `actions/checkout@v4` rejects any path that resolves outside
+      #   `$GITHUB_WORKSPACE` (input-helper.ts: "Repository path '...' is
+      #   not under '...'"). Cloning siblings INSIDE the workspace and
+      #   checking the infra repo into a parallel subdir is the only way
+      #   to satisfy both `actions/checkout` and the unmodified config.
+      #
+      # REF
+      #   `ref: main` matches Requirement 2.1's "deploy main of every repo"
+      #   semantics. A future per-service ref override is out of scope for
+      #   this fix (would need a new `service_ref` input).
+      #
+      # TOKEN
+      #   `${{ secrets.SERVICES_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}`
+      #   prefers a PAT when set (required if any sibling repo is private
+      #   or lives in a different org) and falls back to the workflow's
+      #   default token (sufficient for public same-org repos). This keeps
+      #   the fix free of NEW MANDATORY secrets when the sibling repos are
+      #   public — see file header "CHECKOUT TOKEN" for the cross-org case.
+      # ---------------------------------------------------------------------
+      - name: Check out fiap-arch-analyzer-auth-service
+        uses: actions/checkout@v4
+        with:
+          repository: Thalitafs7/fiap-arch-analyzer-auth-service
+          path: fiap-arch-analyzer-auth-service
+          ref: main
+          fetch-depth: 1
+          token: ${{ secrets.SERVICES_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Check out fiap-arch-analyzer-registration-service
+        uses: actions/checkout@v4
+        with:
+          repository: Thalitafs7/fiap-arch-analyzer-registration-service
+          path: fiap-arch-analyzer-registration-service
+          ref: main
+          fetch-depth: 1
+          token: ${{ secrets.SERVICES_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Check out fiap-arch-analyzer-processing-service
+        uses: actions/checkout@v4
+        with:
+          repository: Thalitafs7/fiap-arch-analyzer-processing-service
+          path: fiap-arch-analyzer-processing-service
+          ref: main
+          fetch-depth: 1
+          token: ${{ secrets.SERVICES_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Check out fiap-arch-analyzer-report-service
+        uses: actions/checkout@v4
+        with:
+          repository: Thalitafs7/fiap-arch-analyzer-report-service
+          path: fiap-arch-analyzer-report-service
+          ref: main
+          fetch-depth: 1
+          token: ${{ secrets.SERVICES_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Check out fiap-arch-analyzer-api-gateway
+        uses: actions/checkout@v4
+        with:
+          repository: Thalitafs7/fiap-arch-analyzer-api-gateway
+          path: fiap-arch-analyzer-api-gateway
+          ref: main
+          fetch-depth: 1
+          token: ${{ secrets.SERVICES_CHECKOUT_TOKEN || secrets.GITHUB_TOKEN }}
+
+      # ---------------------------------------------------------------------
+      # Task 3.3 — Resolve the shared image tag once per run
+      #
+      # CONTRACT (matches PT-3 in tests/test_consolidated_deployment_preservation.py
+      # and the `image_tag` resolver in design.md):
+      #   - `inputs.image_tag` empty               → `git rev-parse --short HEAD`
+      #     of the infra commit just checked out.
+      #   - `inputs.image_tag` non-empty + valid   → returned verbatim.
+      #   - `inputs.image_tag` invalid             → reject with non-zero
+      #     exit BEFORE any mutating step (no terraform apply, no docker
+      #     push, no kubectl apply has run yet at this point).
+      #
+      # VALIDATION REGEX (Docker tag spec subset):
+      #   ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$
+      #     - charset:  letters, digits, dot, underscore, hyphen.
+      #     - length:   1-128 chars.
+      #     - leading:  must NOT start with `.`, `-`, or `_`
+      #                 (Docker tag spec; matches `_is_valid_tag` in PT-3).
+      #
+      # SAFETY
+      #   `inputs.image_tag` is server-rendered into the `RAW_IMAGE_TAG`
+      #   env var via the `env:` block — NOT inlined into the bash script
+      #   body — so shell metacharacters in the input cannot escape into
+      #   command substitution (mitigates GitHub Actions script injection).
+      #
+      # EXPORT
+      #   The resolved value is written to `$GITHUB_ENV` as `IMAGE_TAG` so
+      #   subsequent steps (sibling checkouts, toolchain, orchestrator
+      #   invocation, artifact upload — wired by tasks 3.4-3.7) all see
+      #   the same identifier. The value is also echoed at the top of the
+      #   run log for traceability (matches Property 1's
+      #   `shared_image_tag_used = true` clause in design.md).
+      # ---------------------------------------------------------------------
+      - name: Resolve shared IMAGE_TAG
+        env:
+          RAW_IMAGE_TAG: ${{ inputs.image_tag }}
+        shell: bash
+        working-directory: fiap-arch-analyzer-infra
+        run: |
+          set -euo pipefail
+
+          TAG_REGEX='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+
+          if [ -n "${RAW_IMAGE_TAG:-}" ]; then
+            if ! printf '%s' "$RAW_IMAGE_TAG" | grep -Eq "$TAG_REGEX"; then
+              {
+                echo "::error::invalid inputs.image_tag — rejected before any mutating step."
+                echo "Received: ${RAW_IMAGE_TAG}"
+                echo "Required: matches ${TAG_REGEX} (1-128 chars; charset [A-Za-z0-9._-]; must not start with '.', '-', or '_')."
+              } >&2
+              exit 1
+            fi
+            RESOLVED_TAG="$RAW_IMAGE_TAG"
+            SOURCE="inputs.image_tag (operator override)"
+          else
+            RESOLVED_TAG="$(git rev-parse --short HEAD)"
+            if ! printf '%s' "$RESOLVED_TAG" | grep -Eq "$TAG_REGEX"; then
+              {
+                echo "::error::git rev-parse --short HEAD returned an invalid tag: ${RESOLVED_TAG}"
+                echo "This should not happen on a normal infra checkout — investigate the runner state."
+              } >&2
+              exit 1
+            fi
+            SOURCE="git rev-parse --short HEAD (default)"
+          fi
+
+          echo "============================================================"
+          echo "Shared IMAGE_TAG for this consolidated deploy run"
+          echo "  value : ${RESOLVED_TAG}"
+          echo "  source: ${SOURCE}"
+          echo "============================================================"
+
+          echo "IMAGE_TAG=${RESOLVED_TAG}" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------------
+      # Task 3.5 — Install the toolchain required by scripts/deploy-all.ps1
+      #
+      # WHY THIS SHAPE
+      #   The orchestrator drives 11 stages (terraform init/apply →
+      #   `aws eks update-kubeconfig` → ECR login → `docker build/push` →
+      #   staged `kubectl apply` with `kubectl rollout status` gates →
+      #   Validator). Each stage requires a specific binary on PATH; a
+      #   missing one fails the stage with a confusing "command not
+      #   found" error mid-deploy. Installing the toolchain BEFORE the
+      #   orchestrator runs is the only way to make those failures
+      #   surface synchronously, before any AWS-side mutation.
+      #
+      #   `ubuntu-latest` already preinstalls Docker (`docker --version`),
+      #   PowerShell Core (`pwsh --version`), and AWS CLI v2
+      #   (`aws --version`) — see GitHub-hosted runner image manifest.
+      #   We do NOT add chargeable replacements (no managed CI runners,
+      #   no self-hosted runners, no third-party paid actions) — preserves
+      #   Requirement 3.8 / AP-8 budget envelope.
+      #
+      # VERSION PINS
+      #   - terraform: `~1.7` (matches the pin used by every other
+      #     infra-repo workflow today: ci-develop.yml, ci-feature.yml,
+      #     ci-release.yml, cd-main.yml, infra-main.yml, infra-pr.yml).
+      #     The infra `provider.tf` declares `required_version = ">= 1.5.0"`,
+      #     and `.terraform.lock.hcl` pins the AWS / kubernetes / helm /
+      #     random / tls providers (terraform's own CLI version is not
+      #     pinned in the lock file by design — Terraform tracks providers,
+      #     not CLI version, in lockfiles). `~1.7` keeps the runner CLI
+      #     consistent with the rest of this infra repo's workflows so
+      #     `terraform plan/apply` produces identical state writes whether
+      #     run from `cd-main.yml` or this consolidated workflow.
+      #   - kubectl: pinned to the EKS control-plane minor version
+      #     (`var.eks_cluster_version = "1.30"`). The EKS skew policy
+      #     allows kubectl ±1 minor of the control plane; pinning to
+      #     `1.30.0` removes the skew risk entirely.
+      #   - AWS CLI v2: preinstalled on `ubuntu-latest`. We verify it is
+      #     present (and v2, not the unsupported v1) in the toolchain
+      #     verification step below.
+      #
+      # ACTION SOURCES
+      #   - `hashicorp/setup-terraform@v3` is the official HashiCorp
+      #     action and is already used by every other infra-repo workflow.
+      #   - `azure/setup-kubectl@v4` is Microsoft's officially maintained
+      #     kubectl installer (the de-facto standard for kubectl on
+      #     GitHub-hosted runners; free, no Azure account or login
+      #     required despite the `azure/` org prefix).
+      #
+      # COST / BUDGET
+      #   All three actions and the binaries they install are free —
+      #   zero net change to the AP-8 USD 50–100/month chargeable
+      #   baseline.
+      # ---------------------------------------------------------------------
+      - name: Install Terraform CLI
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.7"
+          terraform_wrapper: false
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: "v1.30.0"
+
+      # ---------------------------------------------------------------------
+      # Toolchain verification — fail-fast surface for missing binaries
+      #
+      # Prints `--version` for every binary the orchestrator depends on.
+      # If any line errors out, this step exits non-zero before
+      # `scripts/deploy-all.ps1` is invoked, so a missing tool is
+      # diagnosed at the toolchain layer instead of mid-stage.
+      #
+      # Pinned tools verified above are already installed; Docker,
+      # PowerShell Core, and AWS CLI v2 are preinstalled on
+      # `ubuntu-latest` — verifying them here also catches any future
+      # runner image regression that would otherwise blow up later.
+      # ---------------------------------------------------------------------
+      - name: Verify toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Toolchain versions"
+          terraform --version
+          kubectl version --client
+          aws --version
+          docker --version
+          pwsh --version
+          echo "::endgroup::"
+
+      # ---------------------------------------------------------------------
+      # Task 3.6 — Invoke the orchestrator as the SINGLE mutating step
+      #
+      # WHY THIS SHAPE
+      #   Every mutating action of this consolidated deploy (terraform
+      #   init/apply, ECR login, `docker build/push`, MongoDB/Redis wait,
+      #   migrations, staged `kubectl apply` with `kubectl rollout status`
+      #   gates, Validator probes, one auto-retry) is encoded inside
+      #   `scripts/deploy-all.ps1`. The 11-stage flow, the stage ordering
+      #   `[auth-service] → [registration-service, report-service,
+      #   processing-service] → [api-gateway]` (read from
+      #   `scripts/deploy-all.config.yaml` `stages[]`), the rollout gates,
+      #   and the auto-retry are ALL the orchestrator's responsibility.
+      #   This YAML never duplicates that logic — Requirement 3.2
+      #   ("local orchestrator semantics preserved") and `design.md`
+      #   "Specific Changes #10" forbid it.
+      #
+      #   This step therefore performs ONE action: invoke the script with
+      #   the resolved shared `IMAGE_TAG` and let it run end-to-end. It
+      #   is the only mutating step in the whole workflow.
+      #
+      # WHY `pwsh -File` (not `& ./script.ps1`)
+      #   Task 3.6 explicitly mandates the `pwsh -File ./scripts/deploy-all.ps1
+      #   -ImageTag $env:IMAGE_TAG` invocation form. Spawning the script as a
+      #   `pwsh -File` child process gives it its own process boundary so
+      #   any non-zero exit (Validator failure, terraform apply failure,
+      #   stale STS token mid-run, etc.) propagates through `$LASTEXITCODE`
+      #   to GitHub Actions' `pwsh` shell wrapper, which surfaces it as the
+      #   step's exit code. `set -e`-style behaviour is the GHA `pwsh`
+      #   shell default (`$ErrorActionPreference = 'stop'` + `$LASTEXITCODE`
+      #   check), so the script's exit code becomes the job's exit code
+      #   without any extra plumbing here (Requirement 2.7).
+      #
+      # WORKING DIRECTORY
+      #   `working-directory: fiap-arch-analyzer-infra` so the script's
+      #   own relative-path resolution (`Split-Path $PSScriptRoot -Parent`
+      #   → infra root, `Join-Path ../fiap-arch-analyzer-<svc>` → sibling
+      #   repos checked out by task 3.4) works unchanged.
+      #
+      # ENVIRONMENT
+      #   `IMAGE_TAG` is already in `$GITHUB_ENV` from task 3.3, exposed
+      #   to PowerShell as `$env:IMAGE_TAG`. AWS_* secrets are exported by
+      #   `aws-actions/configure-aws-credentials@v4` (task 3.2) and
+      #   inherited automatically by the child `pwsh -File` process.
+      #
+      # PRESERVATION BOUNDARY
+      #   This task does NOT modify `scripts/deploy-all.ps1`,
+      #   `scripts/deploy-all.sh`, or `scripts/deploy-all.config.yaml`.
+      #   The preservation tests
+      #   (`tests/test_consolidated_deployment_preservation.py`)
+      #   verify those three files (and infra `cd-main.yml`) are
+      #   byte-identical to their UNFIXED-code SHA256 baselines.
+      # ---------------------------------------------------------------------
+      - name: Run consolidated deployment orchestrator
+        shell: pwsh
+        working-directory: fiap-arch-analyzer-infra
+        # NOTE: the orchestrator script's parameter is `-GitSha`, not
+        # `-ImageTag`. The script param accepts a tag string and uses it
+        # verbatim as the image tag suffix; semantically identical to the
+        # workflow's IMAGE_TAG. Passing $env:IMAGE_TAG here so the shared
+        # resolved tag from task 3.3 is honoured by every `docker push`.
+        run: pwsh -File ./scripts/deploy-all.ps1 -GitSha $env:IMAGE_TAG
+
+      # ---------------------------------------------------------------------
+      # Task 3.7 — Upload the consolidated validation report as an artifact
+      #
+      # WHY THIS SHAPE
+      #   Property 1's `validator_report_written = true` clause requires
+      #   exactly one consolidated report per run, surfaced as a workflow
+      #   artifact so operators can inspect it from the GitHub run UI
+      #   without SSHing to a workstation. The orchestrator
+      #   (`scripts/deploy-all.ps1`, invoked above) writes
+      #   `./artifacts/validation-report-<timestamp>.{json,md}` from its
+      #   own working directory — which is `fiap-arch-analyzer-infra/`
+      #   on this runner (set by the previous step's `working-directory`).
+      #
+      # WHY `if: always()`
+      #   The Validator stage runs near the end of the orchestrator's
+      #   11-stage flow and writes the report whether validation passed
+      #   or failed (the orchestrator exits non-zero on Validator failure
+      #   AFTER persisting the report — see Requirement 2.7). `if: always()`
+      #   guarantees the upload step runs even when the orchestrator step
+      #   exits non-zero, so the failure evidence is preserved as an
+      #   artifact for post-mortem.
+      #
+      # PATH
+      #   `actions/upload-artifact@v4` runs from `$GITHUB_WORKSPACE`, so
+      #   the report glob is rooted at `fiap-arch-analyzer-infra/artifacts/`
+      #   (NOT a bare `./artifacts/`) — that is the same directory the
+      #   orchestrator wrote into one step earlier.
+      #
+      # RETENTION / BUDGET
+      #   No `retention-days:` override → defaults to 90 days, which is
+      #   on the free GitHub Actions tier (no storage charges). Preserves
+      #   the AP-8 USD 50–100/month budget envelope and Requirement 3.8.
+      #
+      # if-no-files-found: warn
+      #   The report MUST be present on a successful run. If the
+      #   orchestrator failed before the Validator stage (e.g. terraform
+      #   apply error, ExpiredToken mid-run), the glob may match nothing —
+      #   `warn` surfaces the absence in the run log without failing the
+      #   upload step itself, since the orchestrator step has already
+      #   surfaced the underlying error.
+      # ---------------------------------------------------------------------
+      - name: Upload validation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-report
+          path: |
+            fiap-arch-analyzer-infra/artifacts/validation-report-*.json
+            fiap-arch-analyzer-infra/artifacts/validation-report-*.md
+          if-no-files-found: warn
