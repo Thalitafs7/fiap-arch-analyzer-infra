@@ -1,9 +1,12 @@
 # =============================================================================
-# Data Sources
+# Network Module
+# VPC, subnets, IGW, route tables, S3 Gateway Endpoint, VPC Flow Logs
+# No NAT Gateway (AWS Academy budget constraint)
 # =============================================================================
 
-data "aws_availability_zones" "available" {
-  state = "available"
+locals {
+  # Pin to us-east-1a / us-east-1b as required by the spec
+  azs = ["${var.aws_region}a", "${var.aws_region}b"]
 }
 
 # =============================================================================
@@ -21,8 +24,18 @@ resource "aws_vpc" "main" {
 }
 
 # =============================================================================
-# VPC Flow Logs (auditoria)
+# VPC Flow Logs → CloudWatch (LabRole as delivery role)
+# Req 1.6 / 18.6
 # =============================================================================
+
+resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
+  name              = "/aws/vpc/flow-logs/${var.project_name}-${var.environment}"
+  retention_in_days = 7
+
+  tags = {
+    Name = "${var.project_name}-vpc-flow-logs-${var.environment}"
+  }
+}
 
 resource "aws_flow_log" "vpc" {
   vpc_id               = aws_vpc.main.id
@@ -36,17 +49,9 @@ resource "aws_flow_log" "vpc" {
   }
 }
 
-resource "aws_cloudwatch_log_group" "vpc_flow_logs" {
-  name              = "/aws/vpc/flow-logs/${var.project_name}-${var.environment}"
-  retention_in_days = 7
-
-  tags = {
-    Name = "${var.project_name}-vpc-flow-logs-${var.environment}"
-  }
-}
-
 # =============================================================================
 # Internet Gateway
+# Req 1.3
 # =============================================================================
 
 resource "aws_internet_gateway" "main" {
@@ -58,7 +63,9 @@ resource "aws_internet_gateway" "main" {
 }
 
 # =============================================================================
-# Public Subnets
+# Public Subnets — us-east-1a (10.0.1.0/24) and us-east-1b (10.0.2.0/24)
+# Tagged: kubernetes.io/role/elb=1 (for ALB controller)
+# Req 1.2, 1.7
 # =============================================================================
 
 resource "aws_subnet" "public" {
@@ -66,20 +73,20 @@ resource "aws_subnet" "public" {
 
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.public_subnet_cidrs[count.index]
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  availability_zone       = local.azs[count.index]
   map_public_ip_on_launch = true
 
-  tags = merge(
-    {
-      Name                     = "${var.project_name}-public-${count.index + 1}-${var.environment}"
-      Tier                     = "public"
-      "kubernetes.io/role/elb" = "1"
-    },
-    var.cluster_name != "" ? {
-      "kubernetes.io/cluster/${var.cluster_name}" = "shared"
-    } : {}
-  )
+  tags = {
+    Name                     = "${var.project_name}-public-${count.index + 1}-${var.environment}"
+    Tier                     = "public"
+    "kubernetes.io/role/elb" = "1"
+  }
 }
+
+# =============================================================================
+# Public Route Table — 0.0.0.0/0 → IGW
+# Req 1.3
+# =============================================================================
 
 resource "aws_route_table" "public" {
   vpc_id = aws_vpc.main.id
@@ -103,7 +110,9 @@ resource "aws_route_table_association" "public" {
 }
 
 # =============================================================================
-# Private Subnets
+# Private Subnets — us-east-1a (10.0.3.0/24) and us-east-1b (10.0.4.0/24)
+# Tagged: kubernetes.io/role/internal-elb=1 + kubernetes.io/cluster/<name>=shared
+# Req 1.2, 1.7
 # =============================================================================
 
 resource "aws_subnet" "private" {
@@ -111,7 +120,7 @@ resource "aws_subnet" "private" {
 
   vpc_id                  = aws_vpc.main.id
   cidr_block              = var.private_subnet_cidrs[count.index]
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  availability_zone       = local.azs[count.index]
   map_public_ip_on_launch = false
 
   tags = merge(
@@ -125,6 +134,11 @@ resource "aws_subnet" "private" {
     } : {}
   )
 }
+
+# =============================================================================
+# Private Route Table (no NAT — Academy budget constraint)
+# Req 1.5
+# =============================================================================
 
 resource "aws_route_table" "private" {
   vpc_id = aws_vpc.main.id
@@ -142,42 +156,31 @@ resource "aws_route_table_association" "private" {
 }
 
 # =============================================================================
-# VPC Endpoint - S3 Gateway (gratuito)
+# S3 Gateway VPC Endpoint — free, keeps S3 traffic off public internet
+# Associated with both public and private route tables
+# Req 1.4
 # =============================================================================
 
 resource "aws_vpc_endpoint" "s3" {
-  vpc_id       = aws_vpc.main.id
-  service_name = "com.amazonaws.${var.aws_region}.s3"
-
+  vpc_id            = aws_vpc.main.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
   vpc_endpoint_type = "Gateway"
+
   route_table_ids = [
     aws_route_table.public.id,
     aws_route_table.private.id,
   ]
 
+  # Allow all S3 access through the endpoint (ECR layers, diagrams bucket, ALB logs)
+  # Bucket-level policies enforce fine-grained access control
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Sid       = "AllowProjectS3Access"
+        Sid       = "AllowAll"
         Effect    = "Allow"
         Principal = "*"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:ListBucket",
-          "s3:DeleteObject"
-        ]
-        Resource = [
-          "arn:aws:s3:::${var.project_name}-*",
-          "arn:aws:s3:::${var.project_name}-*/*"
-        ]
-      },
-      {
-        Sid       = "AllowECRAndEKS"
-        Effect    = "Allow"
-        Principal = "*"
-        Action    = "s3:GetObject"
+        Action    = "s3:*"
         Resource  = "*"
       }
     ]

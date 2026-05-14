@@ -1,186 +1,296 @@
-# Arch Analyzer - Infrastructure as Code
+# Arch Analyzer — Infrastructure as Code
 
-Monorepo de infraestrutura Terraform para o projeto **Arch Analyzer**, projetado para rodar no **AWS Academy** com **Amazon EKS**.
+Terraform monorepo for the **Arch Analyzer** solution. Provisions all AWS resources and the shared Kubernetes cluster bootstrap for the AWS Academy Learner Lab (`us-east-1`).
 
-## Arquitetura
+---
+
+## Architecture Overview
 
 ```
+Internet
+    │ HTTP :80
+    ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                          VPC (10.0.0.0/16)                          │
+│                    VPC 10.0.0.0/16 (us-east-1)                      │
 │                                                                      │
-│  ┌─────────────────────┐       ┌─────────────────────┐              │
-│  │ Public Subnet A      │       │ Public Subnet B      │             │
-│  │ (10.0.1.0/24)       │       │ (10.0.2.0/24)       │             │
-│  │                      │       │                      │             │
-│  │ ┌──────────────────┐│       │ ┌──────────────────┐ │             │
-│  │ │ EKS Node (ASG)   ││       │ │ EKS Node (ASG)   │ │             │
-│  │ │                  ││       │ │                  │ │             │
-│  │ └──────────────────┘│       │ └──────────────────┘ │             │
-│  └─────────────────────┘       └─────────────────────┘              │
-│            │                            │                            │
-│            └──────────┬─────────────────┘                            │
-│                    ┌──▼──┐                                           │
-│                    │ ALB │ ← HTTP :80                                │
-│                    └─────┘                                           │
+│  Public Subnet A (10.0.1.0/24)   Public Subnet B (10.0.2.0/24)     │
+│  ┌──────────────────────────┐    ┌──────────────────────────┐       │
+│  │  ALB (internet-facing)   │────│  ALB (internet-facing)   │       │
+│  │  EKS Node (t3.small)     │    │  EKS Node (t3.small)     │       │
+│  └──────────────────────────┘    └──────────────────────────┘       │
 │                                                                      │
-│              ┌────────────────────────┐                               │
-│              │ EKS Control Plane      │ (gerenciado pela AWS)        │
-│              │ (API Server, etcd)     │                               │
-│              └────────────────────────┘                               │
+│  Private Subnet A (10.0.3.0/24)  Private Subnet B (10.0.4.0/24)    │
+│  ┌──────────────────────────┐                                        │
+│  │  RDS PostgreSQL 15       │  (db.t3.micro, single-AZ)             │
+│  └──────────────────────────┘                                        │
 │                                                                      │
-│  ┌─────────────────────┐       ┌─────────────────────┐              │
-│  │ Private Subnet A     │       │ Private Subnet B     │             │
-│  │ (10.0.3.0/24)       │       │ (10.0.4.0/24)       │             │
-│  │ ┌──────────────────┐│       │                      │             │
-│  │ │ RDS PostgreSQL   ││       │                      │             │
-│  │ │ (db.t3.micro)    ││       │                      │             │
-│  │ └──────────────────┘│       │                      │             │
-│  └─────────────────────┘       └─────────────────────┘              │
-│                                                                      │
-│  S3 (diagramas) ─── VPC Endpoint S3 Gateway                         │
-│  SQS + DLQ (processamento de análises)                               │
+│  S3 ←── VPC Gateway Endpoint (free, no NAT)                         │
+│  SQS + DLQ  │  ECR  │  Secrets Manager  │  CloudWatch               │
 └─────────────────────────────────────────────────────────────────────┘
 
-K8s Workloads:
-  ├── namespace: arch-analyzer-api  → API Cadastro
-  ├── namespace: arch-analyzer-ia   → IA Service + Qdrant (Vector DB)
-  └── namespace: ingress-nginx      → NGINX Ingress Controller
+EKS Workloads (inside nodes):
+  namespace: ingress-nginx      → NGINX Ingress Controller (NodePort 30080)
+  namespace: arch-analyzer-api  → api-gateway, registration-service
+  namespace: arch-analyzer-ia   → processing-service, celery-worker, report-service
+  namespace: auth               → auth-service
+  namespace: data               → MongoDB 7 StatefulSet, Redis StatefulSet
 ```
 
-## Fluxo da Aplicação
+**Key design decisions:**
+- Nodes in **public subnets** — avoids NAT Gateway (~$32/mo per AZ)
+- RDS in **private subnets** — no public accessibility
+- **HTTP-only ALB** — ACM public cert DNS validation not available in Academy
+- **LabRole reuse** — Academy blocks `iam:CreateRole`; no IRSA
+- **MongoDB + Redis on EKS** — DocumentDB and ElastiCache restricted in Academy
 
-1. **Upload de diagramas** → API Cadastro recebe → Upload para S3 → Envia mensagem para SQS
-2. **Processamento IA** → Serviço IA consome SQS → Baixa diagramas do S3 → Processa com Qdrant (Vector DB)
-3. **Webhook de retorno** → IA envia relatório via webhook → API Cadastro atualiza status
-4. **Tratamento de erros** → DLQ captura mensagens falhadas → Consumer de erros atualiza status
+---
 
-## Estrutura do Projeto
+## Repository Ownership
+
+| Artifact | Owner |
+|---|---|
+| All AWS resources (VPC, EKS, RDS, SQS, S3, ECR, ALB, Secrets Manager, CloudWatch) | **This repo** |
+| Shared k8s bootstrap (namespaces, NetworkPolicies, NGINX Ingress, MongoDB, Redis, Fluent Bit, CW Insights, `infra-outputs` ConfigMap) | **This repo** |
+| Deployment_Orchestrator + Validator scripts | **This repo** |
+| Per-service `k8s/` manifests | Each **Service_Repo** |
+
+See [`docs/per-service-k8s-contract.md`](docs/per-service-k8s-contract.md) for the canonical contract every service repo must follow.
+
+---
+
+## Project Structure
 
 ```
-arch-analyzer-infra/
-├── main.tf                          # Orquestração dos módulos
-├── variables.tf                     # Variáveis globais
-├── outputs.tf                       # Outputs globais
-├── provider.tf                      # Provider AWS + versões
-├── terraform.tfvars.example         # Exemplo de variáveis
-├── .gitignore
+fiap-arch-analyzer-infra/
+├── main.tf                          # Root module wiring
+├── variables.tf                     # Root variables
+├── outputs.tf                       # Root outputs (eks_cluster_name, alb_dns_name, ecr_repository_urls)
+├── provider.tf                      # AWS + Kubernetes + Helm providers (region locked to us-east-1)
+├── terraform.tfvars.example         # Variable placeholders (NEVER commit terraform.tfvars)
+├── .tflint.hcl                      # tflint configuration
 │
 ├── modules/
-│   ├── network/                     # VPC, subnets, route tables, VPC endpoints
-│   ├── security/                    # Security Groups (ALB, EKS nodes, RDS)
-│   ├── storage/                     # S3 buckets (diagramas + access logs)
-│   ├── messaging/                   # SQS processing queue + DLQ
-│   ├── database/                    # RDS PostgreSQL 15
-│   ├── eks/                         # EKS cluster + managed node group + addons
-│   ├── alb/                         # Application Load Balancer
-│   └── k8s-config/                  # Namespaces, NetworkPolicies, ConfigMaps, NGINX Ingress
+│   ├── network/          # VPC, subnets, IGW, route tables, S3 Gateway Endpoint, VPC Flow Logs
+│   ├── security/         # Security Groups (ALB, EKS nodes, RDS) — least-privilege by SG reference
+│   ├── storage/          # S3 buckets (diagrams + access logs), SSE, versioning, bucket policies
+│   ├── ecr/              # Private ECR repositories with scan-on-push
+│   ├── messaging/        # SQS processing queue + DLQ, SSE-SQS, redrive policy
+│   ├── database/         # RDS PostgreSQL 15, db.t3.micro, single-AZ, IAM auth
+│   ├── eks/              # EKS cluster + managed node group (t3.small x2), CMK fallback
+│   ├── alb/              # Internet-facing ALB, HTTP :80, NodePort 30080, access logs
+│   ├── k8s-config/       # Namespaces, NetworkPolicies, NGINX Ingress Helm, infra-outputs ConfigMap
+│   ├── secrets/          # AWS Secrets Manager secrets for all services
+│   ├── observability/    # CloudWatch log groups, alarms, dashboard, Fluent Bit, CW Insights
+│   ├── mongodb-on-eks/   # MongoDB 7 StatefulSet + ClusterIP Service in data namespace
+│   └── redis-on-eks/     # Redis StatefulSet + ClusterIP Service in data namespace
 │
+├── scripts/
+│   ├── deploy-all.config.yaml   # Declarative service list for the orchestrator
+│   ├── deploy-all.ps1           # Deployment_Orchestrator (Windows PowerShell)
+│   ├── deploy-all.sh            # Deployment_Orchestrator (Linux/macOS bash)
+│   ├── validate.ps1             # Validator — health-checks all services via ALB (Windows)
+│   ├── validate.sh              # Validator — health-checks all services via ALB (Linux/macOS)
+│   ├── test-terraform.ps1       # Terraform static analysis: fmt + validate + tflint (Windows)
+│   ├── test-terraform.sh        # Terraform static analysis: fmt + validate + tflint (Linux/macOS)
+│   ├── test-kubeconform.ps1     # kubeconform manifest validation (Windows)
+│   └── test-kubeconform.sh      # kubeconform manifest validation (Linux/macOS)
 │
-└── examples/
-    ├── app-repo-api/                # Exemplo: repo da API Cadastro
-    │   └── k8s/
-    │       ├── base/                # Manifests K8s base (Kustomize)
-    │       └── overlays/dev/        # Overlay para dev
-    └── app-repo-ia/                 # Exemplo: repo do Serviço IA
-        └── k8s/
-            ├── base/                # Manifests + Qdrant StatefulSet
-            └── overlays/dev/
+├── tests/
+│   ├── properties/
+│   │   ├── test_security_group_least_privilege.py  # Hypothesis PBT — Req 2.6
+│   │   ├── test_terraform_idempotency.py           # Hypothesis PBT — Req 18.1
+│   │   └── test_deployment_order.py                # Hypothesis PBT — Req 15.9
+│   ├── smoke/
+│   │   └── test_deploy_all_smoke.py                # Smoke tests — Req 15.1, 15.2
+│   ├── e2e/
+│   │   └── test_e2e_pipeline.py                    # E2E pipeline tests — Req 16.x
+│   └── chaos/
+│       └── test_pod_chaos.py                       # Chaos tests — Req 17.1, 17.2
+│
+└── docs/
+    ├── per-service-k8s-contract.md   # Canonical k8s/ folder contract for service repos
+    └── rollback-playbook.md          # Rollback procedures
 ```
 
-## Modelo Multi-Repo
+---
 
-| Repositório | Conteúdo | Responsabilidade |
+## Prerequisites
+
+| Tool | Version | Purpose |
 |---|---|---|
-| `arch-analyzer-infra` (este) | Terraform + GitOps config | Infraestrutura AWS |
-| `arch-analyzer-api` | Código + K8s manifests | API Cadastro |
-| `arch-analyzer-ia` | Código + K8s manifests | Serviço de IA |
+| Terraform | >= 1.5.0 | Infrastructure provisioning |
+| AWS CLI v2 | latest | Credential management, ECR login, kubeconfig |
+| kubectl | >= 1.29 | Kubernetes manifest apply |
+| helm | >= 3.14 | NGINX Ingress, Fluent Bit, CW Insights |
+| Docker | latest | Image build + push |
+| Python 3.11+ | latest | Orchestrator YAML parsing, tests |
+| pyyaml | latest | YAML parsing in scripts |
+| tflint | >= 0.50 | Terraform linting (CI) |
+| kubeconform | >= 0.6 | Manifest validation (CI) |
 
-## Pré-requisitos
+---
 
-- Terraform >= 1.5.0
-- AWS Academy Lab ativo
-- AWS CLI v2 configurado com credenciais do Lab
-- kubectl instalado
-- helm instalado (para post-deploy)
+## Quick Start — Full Stack Deployment
 
-## Quick Start
+### 1. Configure credentials
 
 ```bash
-# 1. Clone o repositório
-git clone <repo-url>
-cd arch-analyzer-infra
-
-# 2. Configure as variáveis
+# Copy and fill in your values (NEVER commit terraform.tfvars)
 cp terraform.tfvars.example terraform.tfvars
-# Edite terraform.tfvars com seus valores (lab_role_arn obrigatório)
+```
 
-# 3. Inicialize o Terraform
+Required values in `terraform.tfvars`:
+- `lab_role_arn` — ARN of the LabRole from your Academy session
+- `eks_public_access_cidrs` — your workstation IP (e.g. `["203.0.113.10/32"]`)
+- `db_password`, `jwt_signing_key`, `mongo_password`, `redis_password`, `llm_api_keys`
+
+### 2. Deploy everything (Windows)
+
+```powershell
+cd scripts
+.\deploy-all.ps1
+```
+
+### 3. Deploy everything (Linux/macOS)
+
+```bash
+cd scripts
+bash deploy-all.sh
+```
+
+The orchestrator will:
+1. Validate all repo paths exist on disk
+2. Verify AWS credentials (`aws sts get-caller-identity`)
+3. Run `terraform init` + `terraform apply`
+4. Update kubeconfig
+5. Build and push all service images to ECR
+6. Wait for MongoDB and Redis to be ready
+7. Apply per-service manifests in dependency order
+8. Run the Validator and write a report to `./artifacts/`
+
+### 4. Manual Terraform-only deployment
+
+```bash
 terraform init
-
-# 4. Verifique o plano
 terraform plan
-
-# 5. Aplique a infraestrutura
 terraform apply
 
-# 6. Configure o kubeconfig
+# Configure kubectl
 aws eks update-kubeconfig --region us-east-1 --name $(terraform output -raw eks_cluster_name)
 ```
 
-## Segurança
+---
 
-### Implementado
-- **EKS Secrets Encryption**: KMS key dedicada com rotação automática
-- **EKS Control Plane Logs**: API, audit e authenticator logs habilitados
-- **S3**: versioning, KMS encryption, block public access, deny insecure transport
-- **SQS**: SSE habilitado, deny insecure transport
-- **RDS**: storage encrypted, IAM auth, private subnet, audit logs
-- **Security Groups**: princípio do menor privilégio (SG referenciando SGs)
-- **NetworkPolicies K8s**: default-deny-ingress + allow explícito
-- **VPC Flow Logs**: auditoria de tráfego
-- **VPC Endpoint S3**: policy restritiva
-- **Pod Security**: runAsNonRoot, runAsUser 10000, readOnlyRootFilesystem, drop ALL capabilities
-- **EKS Subnet Tags**: tags kubernetes.io corretas para service discovery
+## Shared `infra-outputs` ConfigMap
 
-### Limitações (AWS Academy)
-- **ALB HTTP only**: sem HTTPS (ACM pode não estar disponível)
-- **LabRole**: IAM role pré-existente do Academy para EKS e nodes
-- **RDS single-AZ**: sem Multi-AZ (custo)
-- **Nodes em subnets públicas**: evita NAT Gateway (~$32/mês)
+After `terraform apply`, the `k8s-config` module publishes a ConfigMap named **`infra-outputs`** into every application namespace (`arch-analyzer-api`, `arch-analyzer-ia`, `auth`). This is the **sole channel** through which service manifests learn AWS Terraform outputs.
 
-## Estimativa de Custos
+| Key | Example value |
+|---|---|
+| `AWS_REGION` | `us-east-1` |
+| `AWS_ACCOUNT_ID` | `123456789012` |
+| `CLUSTER_NAME` | `arch-analyzer-dev` |
+| `ALB_DNS_NAME` | `arch-analyzer-dev-xxx.us-east-1.elb.amazonaws.com` |
+| `DB_ADDRESS` | `arch-analyzer-dev.xxx.us-east-1.rds.amazonaws.com` |
+| `DB_PORT` | `5432` |
+| `DB_NAME` | `archanalyzer` |
+| `SQS_PROCESSING_QUEUE_URL` | `https://sqs.us-east-1.amazonaws.com/…` |
+| `SQS_DLQ_URL` | `https://sqs.us-east-1.amazonaws.com/…` |
+| `S3_DIAGRAMS_BUCKET` | `arch-analyzer-diagrams-dev-ab12cd` |
+| `ECR_REGISTRY` | `123456789012.dkr.ecr.us-east-1.amazonaws.com` |
+| `ECR_REPOSITORY_URL_GATEWAY` | `…/arch-analyzer-gateway` |
+| `ECR_REPOSITORY_URL_AUTH` | `…/arch-analyzer-auth` |
+| `ECR_REPOSITORY_URL_REGISTRATION` | `…/arch-analyzer-registration` |
+| `ECR_REPOSITORY_URL_PROCESSING` | `…/arch-analyzer-processing` |
+| `ECR_REPOSITORY_URL_REPORT` | `…/arch-analyzer-report` |
 
-| Recurso | Especificação | Custo Estimado/mês |
+Service manifests consume it via:
+
+```yaml
+envFrom:
+  - configMapRef:
+      name: infra-outputs
+```
+
+**Service manifests MUST NOT embed literal AWS values.** The CI guardrail (`no-aws-literals` action) will fail any PR that does.
+
+---
+
+## Running Tests
+
+```bash
+# Install test dependencies
+pip install pytest hypothesis pyyaml requests
+
+# Property-based tests (no AWS required)
+pytest tests/properties/ -v
+
+# Smoke tests (no AWS required)
+pytest tests/smoke/ -v
+
+# E2E tests (requires ALB_DNS env var)
+ALB_DNS=<alb-dns-name> pytest tests/e2e/ -v -m e2e
+
+# Chaos tests (requires KUBECONFIG + kubectl)
+pytest tests/chaos/ -v -m chaos
+
+# Terraform static analysis
+bash scripts/test-terraform.sh
+
+# Kubernetes manifest validation
+bash scripts/test-kubeconform.sh
+```
+
+---
+
+## Terraform Outputs
+
+| Output | Description |
+|---|---|
+| `eks_cluster_name` | EKS cluster name (used by orchestrator) |
+| `eks_cluster_endpoint` | EKS API server URL |
+| `alb_dns_name` | ALB DNS — application entry point |
+| `ecr_repository_urls` | Map of ECR repository URLs keyed by service name |
+| `db_endpoint` | RDS endpoint (host:port) |
+| `db_address` | RDS hostname |
+| `s3_diagrams_bucket` | Diagrams S3 bucket name |
+| `sqs_processing_queue_url` | Processing queue URL |
+| `sqs_dlq_url` | Dead-letter queue URL |
+| `kubeconfig_command` | `aws eks update-kubeconfig …` command |
+
+---
+
+## Security Notes
+
+- **Secrets Manager** — all sensitive credentials stored in AWS Secrets Manager; pods fetch them at startup via an init container using node-level LabRole credentials (IMDS)
+- **No IRSA** — Academy blocks `iam:CreateRole`; pods use node instance profile
+- **Least-privilege SGs** — EKS nodes only accept NodePort traffic from the ALB SG; RDS only accepts port 5432 from the EKS nodes SG
+- **NetworkPolicies** — default-deny ingress in every application namespace; explicit allow-list per flow
+- **No NAT Gateway** — nodes in public subnets; S3 traffic via VPC Gateway Endpoint
+- **`terraform.tfvars` excluded from git** — `.gitignore` blocks `terraform.tfvars` and `*.tfstate*`
+
+---
+
+## Cost Estimate (AWS Academy)
+
+| Resource | Spec | Est. $/mo |
 |---|---|---|
-| EKS Control Plane | Gerenciado | ~$73 |
-| EC2 EKS Nodes (x2) | t3.small | ~$30 |
+| EKS Control Plane | Managed | ~$73 |
+| EC2 EKS Nodes (×2) | t3.small | ~$30 |
 | RDS PostgreSQL | db.t3.micro, single-AZ | ~$13 |
 | ALB | HTTP listener | ~$16 |
-| S3 + SQS | Uso moderado | ~$2 |
-| **Total estimado** | | **~$134/mês** |
+| S3 + SQS + ECR | Moderate usage | ~$3 |
+| **Total** | | **~$135/mo** |
 
-> **Nota**: O custo do EKS control plane (~$73/mês) é o principal fator de aumento comparado a K3s. Em troca, obtém-se cluster gerenciado, auto-scaling, melhor integração AWS e menor overhead operacional.
+> The EKS control plane (~$73/mo) is the main cost driver. Nodes in public subnets avoid NAT Gateway costs (~$32/mo per AZ).
 
-## Decisões Técnicas
+---
 
-| Decisão | Justificativa |
-|---|---|
-| EKS (gerenciado) | Cluster Kubernetes gerenciado pela AWS, auto-scaling, menor overhead |
-| EKS Managed Node Group | Nodes gerenciados com AMI otimizada, rolling updates automáticos |
-| Kustomize (em vez de Helm) | Simplicidade para manifests de apps, patches nativos K8s |
-| Qdrant no EKS | Banco vetorial leve, roda como StatefulSet |
-| NGINX Ingress (NodePort) | Integração com ALB via NodePort, controle de roteamento no cluster |
-| Terraform K8s Config | Configuração K8s via Terraform, sem scripts externos |
+## CI/CD
 
-## Outputs do Terraform
+| Workflow | Trigger | Jobs |
+|---|---|---|
+| `infra-pr.yml` | PR → main | Terraform fmt/validate/tflint, kubeconform, property tests, smoke tests, Infracost |
+| `infra-main.yml` | Push → main | Terraform plan → manual approval → apply → smoke tests |
 
-Após `terraform apply`, os seguintes outputs estarão disponíveis:
-
-- `eks_cluster_name` - Nome do cluster EKS
-- `eks_cluster_endpoint` - URL do API server EKS
-- `eks_cluster_version` - Versão do Kubernetes
-- `alb_dns_name` - URL de acesso à aplicação
-- `db_endpoint` - Endpoint do RDS
-- `s3_diagrams_bucket` - Nome do bucket S3
-- `sqs_processing_queue_url` - URL da fila SQS
-- `kubeconfig_command` - Comando AWS CLI para configurar kubectl
+Service repos each have a `k8s-validate.yml` workflow that runs kubeconform + the `no-aws-literals` guardrail on every PR.

@@ -1,0 +1,113 @@
+name: No AWS Literals
+description: >
+  Scans k8s/ YAML files for hardcoded AWS values (account IDs, RDS hostnames,
+  ECR registry URLs, SQS queue URLs, S3 bucket names). Fails if any are found.
+  Service manifests must consume the infra-outputs ConfigMap instead.
+
+inputs:
+  k8s_dir:
+    description: Directory to scan (relative to repo root)
+    required: false
+    default: k8s
+
+runs:
+  using: composite
+  steps:
+    - name: Scan for hardcoded AWS literals
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        K8S_DIR="${{ inputs.k8s_dir }}"
+        FOUND=0
+
+        echo "::group::Scanning ${K8S_DIR}/ for hardcoded AWS literals"
+
+        # Collect all YAML files (exclude aws-secret-template.yaml — it is a
+        # documentation template, not a live manifest)
+        mapfile -t FILES < <(
+          find "${K8S_DIR}" -name '*.yaml' \
+            -not -name 'aws-secret-template.yaml' \
+            2>/dev/null || true
+        )
+
+        if [[ ${#FILES[@]} -eq 0 ]]; then
+          echo "No YAML files found in ${K8S_DIR}/. Skipping."
+          echo "::endgroup::"
+          exit 0
+        fi
+
+        # ── Pattern definitions ────────────────────────────────────────────────
+        # Each entry: "LABEL|REGEX"
+        # Patterns are intentionally conservative: they match only values that
+        # are unambiguously AWS-specific and should never appear as literals in
+        # a service manifest.
+
+        declare -a PATTERNS=(
+          # 12-digit AWS account ID embedded in an ARN or ECR URL
+          "AWS account ID in ARN/ECR URL|[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com"
+          "AWS account ID in ARN|arn:aws[a-z-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:"
+
+          # RDS hostname
+          "RDS hostname|[a-zA-Z0-9._-]+\.rds\.amazonaws\.com"
+
+          # ECR registry URL (account.dkr.ecr.region.amazonaws.com)
+          "ECR registry URL|[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com"
+
+          # SQS queue URL
+          "SQS queue URL|https://sqs\.[a-z0-9-]+\.amazonaws\.com/[0-9]{12}/"
+
+          # Known S3 bucket name prefixes for this project
+          "S3 diagrams bucket|arch-analyzer-diagrams-[a-z0-9-]+"
+          "S3 access-logs bucket|arch-analyzer-access-logs-[a-z0-9-]+"
+        )
+
+        # ── Scan ──────────────────────────────────────────────────────────────
+        for FILE in "${FILES[@]}"; do
+          for ENTRY in "${PATTERNS[@]}"; do
+            LABEL="${ENTRY%%|*}"
+            REGEX="${ENTRY##*|}"
+
+            # grep -P: Perl-compatible regex; -n: line numbers; -H: filename
+            MATCHES=$(grep -PHn "${REGEX}" "${FILE}" 2>/dev/null || true)
+
+            if [[ -n "${MATCHES}" ]]; then
+              echo "::error file=${FILE},title=Hardcoded AWS literal (${LABEL})::${MATCHES}"
+              echo ""
+              echo "  ❌  ${FILE} — ${LABEL}"
+              while IFS= read -r LINE; do
+                echo "      ${LINE}"
+              done <<< "${MATCHES}"
+              echo ""
+              FOUND=1
+            fi
+          done
+        done
+
+        echo "::endgroup::"
+
+        if [[ ${FOUND} -ne 0 ]]; then
+          echo ""
+          echo "──────────────────────────────────────────────────────────────────"
+          echo "  FAIL: Hardcoded AWS literals detected in k8s/ manifests."
+          echo ""
+          echo "  Service manifests must NOT embed literal AWS values."
+          echo "  Consume the shared infra-outputs ConfigMap instead:"
+          echo ""
+          echo "    envFrom:"
+          echo "      - configMapRef:"
+          echo "          name: infra-outputs"
+          echo ""
+          echo "  Or cherry-pick individual keys:"
+          echo ""
+          echo "    env:"
+          echo "      - name: AWS_REGION"
+          echo "        valueFrom:"
+          echo "          configMapKeyRef:"
+          echo "            name: infra-outputs"
+          echo "            key: AWS_REGION"
+          echo "──────────────────────────────────────────────────────────────────"
+          exit 1
+        fi
+
+        echo "✅  No hardcoded AWS literals found in ${K8S_DIR}/."

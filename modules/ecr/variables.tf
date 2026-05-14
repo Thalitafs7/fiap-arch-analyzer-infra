@@ -12,6 +12,11 @@ variable "environment" {
   type        = string
 }
 
+variable "aws_region" {
+  description = "AWS region where ECR repositories are created — used to build the registry URL"
+  type        = string
+}
+
 variable "repository_names" {
   description = "List of repository names to create (will be prefixed with project_name)"
   type        = list(string)

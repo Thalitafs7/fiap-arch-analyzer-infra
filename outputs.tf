@@ -49,14 +49,24 @@ output "alb_dns_name" {
 # Database Outputs
 # =============================================================================
 
-output "db_endpoint" {
-  description = "RDS PostgreSQL endpoint"
-  value       = module.database.db_endpoint
+output "db_instances" {
+  description = "Map of service key -> { address, endpoint, port, db_name, instance_id, username }. Use this to inspect per-service RDS endpoints."
+  value       = module.database.instances
+  # Marked sensitive because the underlying object carries the master
+  # username and instance attributes derived from var.databases (which is
+  # sensitive). Address / port / db_name are still inspectable via
+  # `terraform output -json db_instances`.
+  sensitive = true
 }
 
 output "db_address" {
-  description = "RDS PostgreSQL address (hostname)"
-  value       = module.database.db_address
+  description = "Backward-compat: address of the registration RDS instance. Prefer `db_instances` for new consumers."
+  value       = module.database.instances["registration"].address
+}
+
+output "db_endpoint" {
+  description = "Backward-compat: endpoint of the registration RDS instance."
+  value       = module.database.instances["registration"].endpoint
 }
 
 # =============================================================================
@@ -75,6 +85,11 @@ output "s3_diagrams_bucket" {
 output "ecr_repository_urls" {
   description = "Map of ECR repository names to their URLs"
   value       = module.ecr.repository_urls
+}
+
+output "ecr_registry_url" {
+  description = "Base ECR registry URL for docker login (account.dkr.ecr.region.amazonaws.com)"
+  value       = module.ecr.registry_url
 }
 
 # =============================================================================

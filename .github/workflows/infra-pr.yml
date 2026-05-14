@@ -1,0 +1,192 @@
+name: Infra PR Validation
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # ── Job 1: Terraform static analysis (fmt + validate + tflint) ──────────────
+  terraform-static:
+    name: Terraform Static Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.7"
+
+      - name: Setup tflint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: "v0.50.3"
+
+      - name: Init tflint plugins
+        run: tflint --init --config .tflint.hcl
+
+      - name: Run Terraform static analysis
+        run: bash scripts/test-terraform.sh
+
+  # ── Job 2: Kubernetes manifest validation (kubeconform) ─────────────────────
+  kubeconform:
+    name: Kubernetes Manifest Validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+        with:
+          path: fiap-arch-analyzer-infra
+
+      - name: Checkout auth-service
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/fiap-arch-analyzer-auth-service
+          path: fiap-arch-analyzer-auth-service
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout api-gateway
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/fiap-arch-analyzer-api-gateway
+          path: fiap-arch-analyzer-api-gateway
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout registration-service
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/fiap-arch-analyzer-registration-service
+          path: fiap-arch-analyzer-registration-service
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout processing-service
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/fiap-arch-analyzer-processing-service
+          path: fiap-arch-analyzer-processing-service
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Checkout report-service
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/fiap-arch-analyzer-report-service
+          path: fiap-arch-analyzer-report-service
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install kubeconform
+        run: |
+          KUBECONFORM_VERSION="v0.6.4"
+          curl -sSL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" \
+            | tar -xz -C /usr/local/bin kubeconform
+          chmod +x /usr/local/bin/kubeconform
+          kubeconform -v
+
+      - name: Run kubeconform validation
+        working-directory: fiap-arch-analyzer-infra
+        run: bash scripts/test-kubeconform.sh
+
+  # ── Job 3: Hypothesis property-based tests ──────────────────────────────────
+  property-tests:
+    name: Property-Based Tests (Hypothesis)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install hypothesis pytest pyyaml requests
+
+      - name: Run property-based tests
+        run: pytest tests/properties/ -v --tb=short
+
+  # ── Job 4: Smoke tests ───────────────────────────────────────────────────────
+  smoke-tests:
+    name: Smoke Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install hypothesis pytest pyyaml requests
+
+      - name: Run smoke tests
+        run: pytest tests/smoke/ -v --tb=short
+
+  # ── Job 5: Infracost cost ceiling check ─────────────────────────────────────
+  infracost:
+    name: Infracost Cost Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~1.7"
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Generate Infracost cost estimate
+        run: |
+          infracost breakdown \
+            --path . \
+            --format json \
+            --out-file /tmp/infracost.json
+
+      - name: Check cost ceiling (USD 100)
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          MONTHLY_COST=$(jq -r '.totalMonthlyCost' /tmp/infracost.json)
+          echo "Estimated monthly cost: \$${MONTHLY_COST}"
+
+          # Skip ceiling check when PR carries the budget-exception label
+          if echo "${PR_LABELS}" | grep -q "budget-exception"; then
+            echo "budget-exception label present — skipping cost ceiling check."
+            exit 0
+          fi
+
+          # Fail if cost exceeds USD 100
+          EXCEEDS=$(python3 -c "import sys; cost=float('${MONTHLY_COST}'); sys.exit(0 if cost <= 100 else 1)" 2>/dev/null && echo "false" || echo "true")
+          if [ "${EXCEEDS}" = "true" ]; then
+            echo "ERROR: Estimated monthly cost \$${MONTHLY_COST} exceeds the USD 100 Academy_Budget ceiling."
+            echo "Add the 'budget-exception' label to this PR to override."
+            exit 1
+          fi
+
+          echo "Cost within budget."
+
+      - name: Upload Infracost report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: infracost-report
+          path: /tmp/infracost.json
+          retention-days: 7

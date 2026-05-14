@@ -9,12 +9,12 @@ output "vpc_cidr" {
 }
 
 output "public_subnet_ids" {
-  description = "IDs of public subnets"
+  description = "IDs of public subnets (index 0 = us-east-1a, index 1 = us-east-1b)"
   value       = aws_subnet.public[*].id
 }
 
 output "private_subnet_ids" {
-  description = "IDs of private subnets"
+  description = "IDs of private subnets (index 0 = us-east-1a, index 1 = us-east-1b)"
   value       = aws_subnet.private[*].id
 }
 
@@ -31,4 +31,14 @@ output "private_route_table_id" {
 output "internet_gateway_id" {
   description = "ID of the Internet Gateway"
   value       = aws_internet_gateway.main.id
+}
+
+output "s3_vpc_endpoint_id" {
+  description = "ID of the S3 Gateway VPC Endpoint"
+  value       = aws_vpc_endpoint.s3.id
+}
+
+output "vpc_flow_log_group_name" {
+  description = "CloudWatch log group name for VPC Flow Logs"
+  value       = aws_cloudwatch_log_group.vpc_flow_logs.name
 }

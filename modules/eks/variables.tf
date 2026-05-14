@@ -17,7 +17,7 @@ variable "aws_region" {
 variable "cluster_version" {
   description = "Kubernetes version for the EKS cluster"
   type        = string
-  default     = "1.29"
+  default     = "1.30"
 }
 
 variable "vpc_id" {
@@ -35,8 +35,8 @@ variable "private_subnet_ids" {
   type        = list(string)
 }
 
-variable "eks_node_security_group_id" {
-  description = "Additional security group ID for EKS nodes"
+variable "eks_nodes_security_group_id" {
+  description = "Security group ID for EKS nodes (from security module)"
   type        = string
 }
 
@@ -61,7 +61,7 @@ variable "node_min_size" {
 variable "node_max_size" {
   description = "Maximum number of worker nodes"
   type        = number
-  default     = 3
+  default     = 5
 }
 
 variable "node_disk_size" {
@@ -76,7 +76,7 @@ variable "lab_role_arn" {
 }
 
 variable "ssh_key_name" {
-  description = "Name of the SSH key pair for node access"
+  description = "Name of the SSH key pair for node access (optional)"
   type        = string
   default     = ""
 }
@@ -93,7 +93,13 @@ variable "endpoint_public_access" {
   default     = true
 }
 
-variable "public_access_cidrs" {
-  description = "CIDR blocks that can access the EKS public API endpoint. Restrict to your IP."
+variable "eks_public_access_cidrs" {
+  description = "CIDR blocks allowed to reach the EKS public API endpoint. Restrict to your workstation IP."
   type        = list(string)
+}
+
+variable "use_aws_managed_kms" {
+  description = "When true, skip CMK creation and use the AWS-managed EKS KMS key (alias/aws/eks). Required when the Learner_Lab denies kms:CreateKey."
+  type        = bool
+  default     = false
 }
