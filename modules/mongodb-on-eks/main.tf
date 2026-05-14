@@ -64,17 +64,7 @@ resource "kubernetes_stateful_set_v1" "mongodb" {
 
           command = ["/bin/sh", "-c"]
           args = [
-            <<-EOT
-            set -e
-            echo "Fetching MongoDB root password from Secrets Manager..."
-            SECRET_JSON=$(aws secretsmanager get-secret-value \
-              --secret-id "${var.root_password_secret_name}" \
-              --region "${var.aws_region}" \
-              --query SecretString \
-              --output text)
-            echo "$SECRET_JSON" | grep -o '"password":"[^"]*"' | cut -d'"' -f4 > /secrets/mongo-password
-            echo "Secret written to /secrets/mongo-password"
-            EOT
+            "set -e; echo 'Fetching MongoDB root password from Secrets Manager...'; SECRET_JSON=$(aws secretsmanager get-secret-value --secret-id '${var.root_password_secret_name}' --region '${var.aws_region}' --query SecretString --output text); echo \"$SECRET_JSON\" | grep -o '\"password\":\"[^\"]*\"' | cut -d'\"' -f4 > /secrets/mongo-password; echo 'Secret written to /secrets/mongo-password'"
           ]
 
           volume_mount {
