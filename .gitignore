@@ -8,6 +8,14 @@ tfplan
 *.tfplan
 crash.log
 crash.*.log
+terraform-apply.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.hypothesis/
+.pytest_cache/
 
 # Sensitive files
 terraform.tfvars
