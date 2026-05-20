@@ -22,10 +22,10 @@ jobs:
       - name: Terraform Init
         run: terraform init
 
-      - name: Terraform Apply
+      - name: Terraform Plan
         # In a real environment, you'd need AWS credentials configured.
         # This step is placeholder for the actual deployment.
-        run: terraform apply -auto-approve
+        run: terraform plan -var="db_password=dummy" -var="lab_role_arn=arn:aws:iam::012345678901:role/LabRole" -var="eks_public_access_cidrs=[\"0.0.0.0/0\"]"
 
       - name: Tag release
         if: success()
